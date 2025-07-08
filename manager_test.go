@@ -1,4 +1,4 @@
-package protection_test
+package kx_test
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 var ctx = context.Background()
 
 func TestNewManager(t *testing.T) {
-	registry, err := protection.NewRegistry()
+	registry, err := kx.NewRegistry()
 	require.NoError(t, err)
 	cipherFactory := mock.NewCipherFactory()
 	hashFactory := nop.NewHashFactory()
@@ -31,7 +31,7 @@ func TestNewManager(t *testing.T) {
 		name          string
 		cipherFactory api.CipherFactory
 		hashFactory   api.HashFactory
-		registry      *protection.Registry
+		registry      *kx.Registry
 		wantErr       string
 	}{
 		{
@@ -65,7 +65,7 @@ func TestNewManager(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager, err := protection.NewManager(tt.cipherFactory, tt.hashFactory, tt.registry)
+			manager, err := kx.NewManager(tt.cipherFactory, tt.hashFactory, tt.registry)
 
 			if tt.wantErr != "" {
 				assert.Error(t, err)
@@ -80,15 +80,15 @@ func TestNewManager(t *testing.T) {
 	}
 }
 
-func mustEncryptObj[T any](t *testing.T, obj T, m *protection.Manager) (T, string) {
-	encrypted, ciphertext, err := protection.EncryptStruct(ctx, m, obj, nil)
+func mustEncryptObj[T any](t *testing.T, obj T, m *kx.Manager) (T, string) {
+	encrypted, ciphertext, err := kx.EncryptStruct(ctx, m, obj, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, ciphertext)
 	require.NotNil(t, encrypted)
 	return encrypted, ciphertext
 }
-func mustDecryptObj[T any](t *testing.T, encrypted T, ciphertext string, m *protection.Manager) T {
-	decrypted, err := protection.DecryptStruct(ctx, m, encrypted, ciphertext, nil)
+func mustDecryptObj[T any](t *testing.T, encrypted T, ciphertext string, m *kx.Manager) T {
+	decrypted, err := kx.DecryptStruct(ctx, m, encrypted, ciphertext, nil)
 	require.NoError(t, err)
 	return decrypted
 }
@@ -96,10 +96,10 @@ func mustDecryptObj[T any](t *testing.T, encrypted T, ciphertext string, m *prot
 func TestManager(t *testing.T) {
 	cipherFactory := mock.NewCipherFactory()
 	hashFactory := nop.NewHashFactory()
-	registry, err := protection.NewRegistry()
+	registry, err := kx.NewRegistry()
 	require.NoError(t, err)
-	mustNewManager := func(t *testing.T) *protection.Manager {
-		manager, err := protection.NewManager(cipherFactory, hashFactory, registry)
+	mustNewManager := func(t *testing.T) *kx.Manager {
+		manager, err := kx.NewManager(cipherFactory, hashFactory, registry)
 		require.NoError(t, err)
 		return manager
 	}
@@ -136,7 +136,7 @@ func TestManager(t *testing.T) {
 		type BasicType struct {
 			Field string
 		}
-		registry.MustRegisterStruct(BasicType{}, protection.WithRegularField("Field", false))
+		registry.MustRegisterStruct(BasicType{}, kx.WithRegularField("Field", false))
 		manager := mustNewManager(t)
 		// Test decryption with empty EncryptedData
 		decrypted := &BasicType{
@@ -152,7 +152,7 @@ func TestManager(t *testing.T) {
 			Field string
 		}
 
-		registry.MustRegisterStruct(BasicType{}, protection.WithRegularField("Field", false))
+		registry.MustRegisterStruct(BasicType{}, kx.WithRegularField("Field", false))
 		manager := mustNewManager(t)
 
 		// Test decryption with invalid base64 data
@@ -190,11 +190,11 @@ func TestManager(t *testing.T) {
 		}
 
 		registry.MustRegisterStruct(BasicTypes{},
-			protection.WithRegularField("Bool", false),
-			protection.WithRegularField("Int", false),
-			protection.WithRegularField("Float", false),
-			protection.WithRegularField("String", false),
-			protection.WithRegularField("Time", false),
+			kx.WithRegularField("Bool", false),
+			kx.WithRegularField("Int", false),
+			kx.WithRegularField("Float", false),
+			kx.WithRegularField("String", false),
+			kx.WithRegularField("Time", false),
 		)
 		manager := mustNewManager(t)
 
@@ -221,7 +221,7 @@ func TestManager(t *testing.T) {
 			Metadata []byte
 		}
 
-		registry.MustRegisterStruct(MapStruct{}, protection.WithJSONField("Metadata", []protection.JSONPathConfig{
+		registry.MustRegisterStruct(MapStruct{}, kx.WithJSONField("Metadata", []kx.JSONPathConfig{
 			{Path: "sensitive.field1.value", Hash: false},
 			{Path: "sensitive.field2.value", Hash: false},
 		}))
@@ -259,11 +259,11 @@ func TestManager(t *testing.T) {
 		}
 
 		registry.MustRegisterStruct(ComplexTestStruct{},
-			protection.WithRegularField("Name", false),
-			protection.WithRegularField("CreatedAt", false),
-			protection.WithRegularField("Numbers", false),
-			protection.WithRegularField("NestedType", false),
-			protection.WithJSONField("Metadata", []protection.JSONPathConfig{
+			kx.WithRegularField("Name", false),
+			kx.WithRegularField("CreatedAt", false),
+			kx.WithRegularField("Numbers", false),
+			kx.WithRegularField("NestedType", false),
+			kx.WithJSONField("Metadata", []kx.JSONPathConfig{
 				{Path: "sensitive.ssn.value", Hash: false},
 				{Path: "sensitive.passport.value", Hash: false},
 			}),
@@ -318,7 +318,7 @@ func TestManager(t *testing.T) {
 
 		t.Run("snake_case_json", func(t *testing.T) {
 			registry.MustRegisterStruct(TestStruct{},
-				protection.WithJSONField("Metadata", []protection.JSONPathConfig{
+				kx.WithJSONField("Metadata", []kx.JSONPathConfig{
 					{Path: "customer_type", Hash: true},
 					{Path: "corporate_identity.department_name", Hash: true},
 				}),
@@ -361,7 +361,7 @@ func TestManager(t *testing.T) {
 
 		t.Run("camel_case_json", func(t *testing.T) {
 			registry.MustRegisterStruct(TestStruct{},
-				protection.WithJSONField("Metadata", []protection.JSONPathConfig{
+				kx.WithJSONField("Metadata", []kx.JSONPathConfig{
 					{Path: "customerType", Hash: true},
 					{Path: "corporateIdentity.departmentName", Hash: true},
 				}),
@@ -408,10 +408,10 @@ func TestManager(t *testing.T) {
 func TestManager_Hash(t *testing.T) {
 	cipherFactory := mock.NewCipherFactory()
 	hashFactory := nop.NewHashFactory()
-	registry, err := protection.NewRegistry()
+	registry, err := kx.NewRegistry()
 	require.NoError(t, err)
-	mustNewManager := func(t *testing.T) *protection.Manager {
-		manager, err := protection.NewManager(cipherFactory, hashFactory, registry)
+	mustNewManager := func(t *testing.T) *kx.Manager {
+		manager, err := kx.NewManager(cipherFactory, hashFactory, registry)
 		require.NoError(t, err)
 		return manager
 	}
@@ -422,7 +422,7 @@ func TestManager_Hash(t *testing.T) {
 			HashedPassword string
 		}
 
-		registry.MustRegisterStruct(User{}, protection.WithRegularField("Password", true))
+		registry.MustRegisterStruct(User{}, kx.WithRegularField("Password", true))
 		manager := mustNewManager(t)
 
 		original := &User{
@@ -445,7 +445,7 @@ func TestManager_Hash(t *testing.T) {
 			// HashedPassword field is missing
 		}
 
-		registry.MustRegisterStruct(User{}, protection.WithRegularField("Password", true))
+		registry.MustRegisterStruct(User{}, kx.WithRegularField("Password", true))
 		manager := mustNewManager(t)
 
 		original := &User{
@@ -463,7 +463,7 @@ func TestManager_Hash(t *testing.T) {
 			Password       string
 			HashedPassword []byte // Wrong type, should be string
 		}
-		registry.MustRegisterStruct(User{}, protection.WithRegularField("Password", true))
+		registry.MustRegisterStruct(User{}, kx.WithRegularField("Password", true))
 		manager := mustNewManager(t)
 		original := &User{
 			Password: "mypassword123",
@@ -483,8 +483,8 @@ func TestManager_Hash(t *testing.T) {
 				Profile        []byte
 			}
 			registry.MustRegisterStruct(User{},
-				protection.WithRegularField("Password", true),
-				protection.WithJSONField("Profile", []protection.JSONPathConfig{
+				kx.WithRegularField("Password", true),
+				kx.WithJSONField("Profile", []kx.JSONPathConfig{
 					{Path: "username", Hash: false}, // Do not hash this field
 					{Path: "gender", Hash: true},    // Hash this field
 				}),
@@ -509,8 +509,8 @@ func TestManager_Hash(t *testing.T) {
 				Profile        datatypes.JSON
 			}
 			registry.MustRegisterStruct(User{},
-				protection.WithRegularField("Password", true),
-				protection.WithJSONField("Profile", []protection.JSONPathConfig{
+				kx.WithRegularField("Password", true),
+				kx.WithJSONField("Profile", []kx.JSONPathConfig{
 					{Path: "username", Hash: false}, // Do not hash this field
 					{Path: "gender", Hash: true},    // Hash this field
 				}),
@@ -535,7 +535,7 @@ func TestManager_Hash(t *testing.T) {
 			EncryptedData  string
 		}
 
-		registry.MustRegisterStruct(User{}, protection.WithRegularField("Password", true))
+		registry.MustRegisterStruct(User{}, kx.WithRegularField("Password", true))
 		manager := mustNewManager(t)
 		originalA := &User{Password: "mypassword123"}
 		originalB := &User{Password: "mypassword123"}
@@ -566,9 +566,9 @@ func TestManager_Hash(t *testing.T) {
 		}
 
 		registry.MustRegisterStruct(User{},
-			protection.WithRegularField("Password", true),
-			protection.WithRegularField("Username", true),
-			protection.WithRegularField("Email", true))
+			kx.WithRegularField("Password", true),
+			kx.WithRegularField("Username", true),
+			kx.WithRegularField("Email", true))
 		manager := mustNewManager(t)
 
 		original := &User{

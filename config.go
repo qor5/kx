@@ -1,4 +1,4 @@
-package protection
+package kx
 
 // CipherKind represents the type of encryption to be used
 type CipherKind string

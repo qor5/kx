@@ -14,21 +14,21 @@ func main() {
 	flag.Parse()
 
 	// Validate key size
-	var size protection.KeySize
+	var size kx.KeySize
 	switch *keySize {
 	case 128:
-		size = protection.KeySize128
+		size = kx.KeySize128
 	case 192:
-		size = protection.KeySize192
+		size = kx.KeySize192
 	case 256:
-		size = protection.KeySize256
+		size = kx.KeySize256
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Invalid key size %d. Must be 128, 192, or 256.\n", *keySize)
 		os.Exit(1)
 	}
 
 	// Generate key
-	key, err := protection.GenerateAESKey(size)
+	key, err := kx.GenerateAESKey(size)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating key: %v\n", err)
 		os.Exit(1)

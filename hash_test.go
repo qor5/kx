@@ -1,4 +1,4 @@
-package protection_test
+package kx_test
 
 import (
 	"crypto/sha256"

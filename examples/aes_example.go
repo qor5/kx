@@ -12,23 +12,23 @@ import (
 func main() {
 	// Generate or use an existing key
 	// In production, you should store this key securely and use it consistently
-	keySize := protection.KeySize256
-	base64Key, err := protection.GenerateAESKey(keySize)
+	keySize := kx.KeySize256
+	base64Key, err := kx.GenerateAESKey(keySize)
 	if err != nil {
 		log.Fatalf("Failed to generate key: %v", err)
 	}
 	fmt.Printf("Generated key (base64): %s\n", base64Key)
 
 	// Create the AES cipher config
-	cfg := protection.CipherConfig{
-		Kind: protection.CipherKindAES,
-		AES: protection.CipherAESConfig{
+	cfg := kx.CipherConfig{
+		Kind: kx.CipherKindAES,
+		AES: kx.CipherAESConfig{
 			Key: base64Key,
 		},
 	}
 
 	// Create the cipher factory
-	factory, err := protection.NewCipherFactory(cfg)
+	factory, err := kx.NewCipherFactory(cfg)
 	if err != nil {
 		log.Fatalf("Failed to create cipher factory: %v", err)
 	}
