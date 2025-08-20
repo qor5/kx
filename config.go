@@ -35,7 +35,6 @@ type HasherKind string
 
 const (
 	HasherKindHMAC HasherKind = "hmac"
-	hasherSHA256   HasherKind = "sha256"
 	HasherKindNOP  HasherKind = "nop"
 )
 

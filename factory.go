@@ -9,7 +9,6 @@ import (
 	"github.com/qor5/kx/api"
 	"github.com/qor5/kx/awskms"
 	"github.com/qor5/kx/nop"
-	"github.com/qor5/kx/sha256"
 	"github.com/qor5/kx/xhmac"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -61,8 +60,6 @@ func NewHashFactory(config HasherConfig) (api.HashFactory, error) {
 			return nil, err
 		}
 		return f, nil
-	case hasherSHA256:
-		return sha256.NewHashFactory(), nil
 	case HasherKindNOP:
 		return nop.NewHashFactory(), nil
 	default:
