@@ -50,12 +50,12 @@ func NewManager(cipherFactory api.CipherFactory, hashFactory api.HashFactory, re
 }
 
 func NewManagerByConfig(config Config, registry *Registry, opts ...ManagerOption) (*Manager, error) {
-	cipherFactory, err := NewCipherFactory(config.CipherConfig)
+	cipherFactory, err := NewCipherFactory(config.KMSKeyID)
 	if err != nil {
 		return nil, err
 	}
 
-	hashFactory, err := NewHashFactory(config.HasherConfig)
+	hashFactory, err := NewHashFactory(config.HashKey)
 	if err != nil {
 		return nil, err
 	}
