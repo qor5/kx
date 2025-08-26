@@ -15,8 +15,8 @@ type HashFactory struct {
 }
 
 func NewHashFactory(key []byte) (api.HashFactory, error) {
-	if len(key) < sha256.BlockSize {
-		return nil, errors.Errorf("key size(%d) is too short, want at least %d", len(key), sha256.BlockSize)
+	if len(key) < sha256.Size {
+		return nil, errors.Errorf("key size(%d) is too short, want at least %d", len(key), sha256.Size)
 	}
 	return &HashFactory{
 		key: key,

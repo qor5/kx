@@ -1,19 +1,31 @@
 package kx_test
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/qor5/kx"
+	"github.com/qor5/kx/xhmac"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	psha256 "github.com/qor5/kx/sha256"
 )
 
 func TestHashVal(t *testing.T) {
-	hashFactory := psha256.NewHashFactory()
+	key := make([]byte, sha256.BlockSize)
+	n, err := rand.Read(key)
+	require.NoError(t, err)
+	require.Equal(t, sha256.BlockSize, n)
+	hashFactory, err := xhmac.NewHashFactory(key)
+	require.NoError(t, err)
+
+	hashData := func(data []byte) string {
+		h := hashFactory.NewHash()
+		h.Write(data)
+		return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	}
 
 	tests := []struct {
 		name    string
@@ -25,22 +37,22 @@ func TestHashVal(t *testing.T) {
 			name: "string value",
 			val:  "Hello World",
 			// nop hash factory uses sha256
-			want: sha256Base64([]byte("hello world")),
+			want: hashData([]byte("hello world")),
 		},
 		{
 			name: "pointer to string",
 			val:  stringPtr("Hello World"),
-			want: sha256Base64([]byte("hello world")),
+			want: hashData([]byte("hello world")),
 		},
 		{
 			name: "bytes",
 			val:  []byte("Hello World"),
-			want: sha256Base64([]byte("Hello World")),
+			want: hashData([]byte("Hello World")),
 		},
 		{
 			name: "pointer to bytes",
 			val:  bytesPtr([]byte("Hello World")),
-			want: sha256Base64([]byte("Hello World")),
+			want: hashData([]byte("Hello World")),
 		},
 		{
 			name: "struct",
@@ -51,7 +63,7 @@ func TestHashVal(t *testing.T) {
 				Name: "John",
 				Age:  30,
 			},
-			want: sha256Base64(mustMarshalJSON(struct {
+			want: hashData(mustMarshalJSON(struct {
 				Name string
 				Age  int
 			}{
@@ -62,24 +74,24 @@ func TestHashVal(t *testing.T) {
 		{
 			name: "slice of non-bytes",
 			val:  []string{"hello", "world"},
-			want: sha256Base64(mustMarshalJSON([]string{"hello", "world"})),
+			want: hashData(mustMarshalJSON([]string{"hello", "world"})),
 		},
 		{
 			name: "unicode string",
 			val:  "Café",
 			// é is preserved in lowercase
-			want: sha256Base64([]byte("café")),
+			want: hashData([]byte("café")),
 		},
 		{
 			name: "full width string",
 			val:  "Ｈｅｌｌｏ",
-			want: sha256Base64([]byte("hello")),
+			want: hashData([]byte("hello")),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := HashVal(hashFactory, tt.val)
+			got, err := kx.HashVal(hashFactory, tt.val)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
@@ -106,10 +118,4 @@ func mustMarshalJSON(v any) []byte {
 		panic(err)
 	}
 	return data
-}
-
-func sha256Base64(data []byte) string {
-	h := sha256.New()
-	h.Write(data)
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }

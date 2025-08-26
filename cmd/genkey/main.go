@@ -1,41 +1,23 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"flag"
 	"fmt"
-	"os"
-
 	"github.com/qor5/kx"
+	"log"
 )
 
 func main() {
 	// Define command-line flags
-	keySize := flag.Int("size", 256, "Key size in bits (128, 192, or 256)")
+	keySize := flag.Int("size", sha256.Size, "sha256 key size(default 32 bytes)")
 	flag.Parse()
-
-	// Validate key size
-	var size kx.KeySize
-	switch *keySize {
-	case 128:
-		size = kx.KeySize128
-	case 192:
-		size = kx.KeySize192
-	case 256:
-		size = kx.KeySize256
-	default:
-		fmt.Fprintf(os.Stderr, "Error: Invalid key size %d. Must be 128, 192, or 256.\n", *keySize)
-		os.Exit(1)
-	}
-
-	// Generate key
-	key, err := kx.GenerateAESKey(size)
+	key := make([]byte, *keySize)
+	_, err := rand.Read(key)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error generating key: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Error generating key: %v\n", err)
 	}
-
-	// Output the key
-	fmt.Printf("Generated AES-%d key (base64):\n%s\n", *keySize, key)
-	fmt.Printf("\nAdd this to your configuration as:\n")
-	fmt.Printf("cipher:\n  kind: aes\n  aes:\n    key: %s\n", key)
+	encodedKey := kx.EncodeKey(key)
+	fmt.Printf("Generated key (base64):\n%s\n", encodedKey)
 }

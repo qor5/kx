@@ -2,11 +2,14 @@ package kx_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
-	"github.com/qor5/kx"
-	"github.com/samber/lo"
 	"testing"
 	"time"
+
+	"github.com/qor5/kx"
+	"github.com/samber/lo"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -16,16 +19,25 @@ import (
 
 	"github.com/qor5/kx/api"
 	"github.com/qor5/kx/api/mock"
-	"github.com/qor5/kx/nop"
+	"github.com/qor5/kx/xhmac"
 )
 
 var ctx = context.Background()
+
+func getHashKey(t *testing.T) []byte {
+	key := make([]byte, sha256.Size)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	return key
+}
 
 func TestNewManager(t *testing.T) {
 	registry, err := kx.NewRegistry()
 	require.NoError(t, err)
 	cipherFactory := mock.NewCipherFactory()
-	hashFactory := nop.NewHashFactory()
+	hashKey := getHashKey(t)
+	hashFactory, err := xhmac.NewHashFactory(hashKey)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name          string
@@ -87,6 +99,7 @@ func mustEncryptObj[T any](t *testing.T, obj T, m *kx.Manager) (T, string) {
 	require.NotNil(t, encrypted)
 	return encrypted, ciphertext
 }
+
 func mustDecryptObj[T any](t *testing.T, encrypted T, ciphertext string, m *kx.Manager) T {
 	decrypted, err := kx.DecryptStruct(ctx, m, encrypted, ciphertext, nil)
 	require.NoError(t, err)
@@ -95,7 +108,9 @@ func mustDecryptObj[T any](t *testing.T, encrypted T, ciphertext string, m *kx.M
 
 func TestManager(t *testing.T) {
 	cipherFactory := mock.NewCipherFactory()
-	hashFactory := nop.NewHashFactory()
+	hashKey := getHashKey(t)
+	hashFactory, err := xhmac.NewHashFactory(hashKey)
+	require.NoError(t, err)
 	registry, err := kx.NewRegistry()
 	require.NoError(t, err)
 	mustNewManager := func(t *testing.T) *kx.Manager {
@@ -407,7 +422,9 @@ func TestManager(t *testing.T) {
 
 func TestManager_Hash(t *testing.T) {
 	cipherFactory := mock.NewCipherFactory()
-	hashFactory := nop.NewHashFactory()
+	hashKey := getHashKey(t)
+	hashFactory, err := xhmac.NewHashFactory(hashKey)
+	require.NoError(t, err)
 	registry, err := kx.NewRegistry()
 	require.NoError(t, err)
 	mustNewManager := func(t *testing.T) *kx.Manager {
