@@ -145,10 +145,10 @@ func buildEnvFileContent(base string, region string) string {
 		b.WriteString(strings.TrimSpace(base))
 		b.WriteByte('\n')
 	}
-	b.WriteString("AWS_REGION='")
+	b.WriteString("export AWS_REGION='")
 	b.WriteString(region)
 	b.WriteString("'\n")
-	b.WriteString("AWS_SDK_LOAD_CONFIG=1\n")
+	b.WriteString("export AWS_SDK_LOAD_CONFIG=1\n")
 	return b.String()
 }
 
