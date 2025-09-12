@@ -49,7 +49,10 @@ func NewManager(cipherFactory api.CipherFactory, hashFactory api.HashFactory, re
 	return m, nil
 }
 
-func NewManagerByConfig(config Config, registry *Registry, opts ...ManagerOption) (*Manager, error) {
+func NewManagerByConfig(config *Config, registry *Registry, opts ...ManagerOption) (*Manager, error) {
+	if config == nil {
+		return nil, errors.New("config is required")
+	}
 	cipherFactory, err := NewCipherFactory(config.KMSKeyID)
 	if err != nil {
 		return nil, err
