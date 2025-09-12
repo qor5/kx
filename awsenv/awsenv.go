@@ -28,6 +28,11 @@ import (
 //   - QOR_OIDC2AWS_ALIAS: oidc2aws alias (default: qor5-test)
 //   - QOR_AWSENV_FORCE_REFRESH: if true-like, force refresh even if valid
 func Ensure(ctx context.Context) error {
+	// Skip entirely in GitHub CI environments
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("GITHUB_ACTIONS")), "true") {
+		return nil
+	}
+
 	projectRoot, err := detectProjectRoot()
 	if err != nil {
 		return err
