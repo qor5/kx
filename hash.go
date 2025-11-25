@@ -3,6 +3,7 @@ package kx
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -13,6 +14,10 @@ import (
 )
 
 // HashVal hashes a value using the provided hash factory.
+// For values implementing fmt.Stringer:
+//   - Uses the String() method result directly without any transformation
+//   - This allows callers to customize the hash behavior
+//
 // For string values:
 //   - Converts to lowercase for case-insensitive comparison
 //   - Uses width.Narrow to convert full-width characters to their half-width equivalents
@@ -25,24 +30,30 @@ import (
 // For other types:
 //   - Marshals to JSON before hashing
 func HashVal(hashFactory api.HashFactory, val any) (string, error) {
-	rv := reflect.Indirect(reflect.ValueOf(val))
 	var data []byte
-	switch rv.Kind() {
-	case reflect.String:
-		data = []byte(strings.ToLower(width.Narrow.String(rv.String())))
-	case reflect.Slice:
-		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			data = rv.Bytes()
-			break
+	// Check if val implements fmt.Stringer interface
+	if stringer, ok := val.(fmt.Stringer); ok {
+		str := stringer.String()
+		data = []byte(str)
+	} else {
+		rv := reflect.Indirect(reflect.ValueOf(val))
+		switch rv.Kind() {
+		case reflect.String:
+			data = []byte(strings.ToLower(width.Narrow.String(rv.String())))
+		case reflect.Slice:
+			if rv.Type().Elem().Kind() == reflect.Uint8 {
+				data = rv.Bytes()
+				break
+			}
+			// if kind is slice but its element type is not uint8, fall through.
+			fallthrough
+		default:
+			jsonData, err := json.Marshal(rv.Interface())
+			if err != nil {
+				return "", errors.Wrap(err, "failed to marshal value for hashing")
+			}
+			data = jsonData
 		}
-		// if kind is slice but its element type is not uint8, fall through.
-		fallthrough
-	default:
-		jsonData, err := json.Marshal(rv.Interface())
-		if err != nil {
-			return "", errors.Wrap(err, "failed to marshal value for hashing")
-		}
-		data = jsonData
 	}
 	h := hashFactory.NewHash()
 	_, err := h.Write(data)

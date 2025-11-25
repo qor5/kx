@@ -5,13 +5,25 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"testing"
+	"time"
+
 	"github.com/qor5/kx"
 	"github.com/qor5/kx/xhmac"
-	"testing"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type Birthday struct {
+	time.Time
+}
+
+func (b *Birthday) String() string {
+	if b == nil {
+		return ""
+	}
+	return b.Format(time.RFC3339)
+}
 
 func TestHashVal(t *testing.T) {
 	key := make([]byte, sha256.BlockSize)
@@ -86,6 +98,22 @@ func TestHashVal(t *testing.T) {
 			name: "full width string",
 			val:  "Ｈｅｌｌｏ",
 			want: hashData([]byte("hello")),
+		},
+		{
+			name: "nil pointer with fmt.Stringer implementation",
+			val:  (*Birthday)(nil),
+			want: hashData([]byte("")), // String() returns empty string for nil
+		},
+		{
+			name: "valid pointer with fmt.Stringer implementation",
+			val: func() *Birthday {
+				t := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+				b := Birthday{
+					Time: t,
+				}
+				return &b
+			}(),
+			want: hashData([]byte("2024-01-15T10:30:00Z")), // String() returns RFC3339 format
 		},
 	}
 
