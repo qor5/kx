@@ -5,9 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	clone "github.com/huandu/go-clone/generic"
 	"reflect"
 	"strings"
+
+	clone "github.com/huandu/go-clone/generic"
 
 	"github.com/pkg/errors"
 	"github.com/theplant/appkit/logtracing"
@@ -232,8 +233,14 @@ func (m *Manager) decryptRegularField(fieldName string, fieldValue reflect.Value
 		return nil // field not found in encrypted data, skip
 	}
 
-	// Try direct assignment first
+	// Handle nil interface{} - reflect.ValueOf(nil) returns invalid Value
 	encryptedValueReflect := reflect.ValueOf(encryptedValue)
+	if !encryptedValueReflect.IsValid() {
+		fieldValue.Set(reflect.Zero(fieldValue.Type()))
+		return nil
+	}
+
+	// Try direct assignment first
 	if encryptedValueReflect.Type().AssignableTo(fieldValue.Type()) {
 		fieldValue.Set(encryptedValueReflect)
 		return nil

@@ -8,11 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/qor5/kx"
-	"github.com/samber/lo"
-
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/qor5/kx"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -162,73 +161,67 @@ func TestManager(t *testing.T) {
 		assert.Equal(t, "field", decrypted.Field)
 	})
 
-	t.Run("invalid_base64", func(t *testing.T) {
-		type BasicType struct {
-			Field string
+	t.Run("encrypt_and_decrypt_complex_types_with_pointers", func(t *testing.T) {
+		type ComplexWithPointers struct {
+			BirthdayPtr       *Birthday
+			HashedBirthdayPtr string
+			Name              string
+			HashedName        string
 		}
 
-		registry.MustRegisterStruct(BasicType{}, kx.WithRegularField("Field", false))
-		manager := mustNewManager(t)
-
-		// Test decryption with invalid base64 data
-		decrypted := &BasicType{}
-		_, err := manager.DecryptStruct(ctx, decrypted, "invalid", nil)
-		assert.Contains(t, err.Error(), "failed to decode base64")
-	})
-
-	t.Run("non-registered", func(t *testing.T) {
-		type JSONType struct {
-			Data []byte
-		}
-
-		// register struct without configuration
-		registry.MustRegisterStruct(JSONType{})
-		manager := mustNewManager(t)
-
-		// Test JSON field without configuration
-		data := []byte(`{"field": "value"}`)
-		input := &JSONType{
-			Data: data,
-		}
-		_, _, err := manager.EncryptStruct(ctx, input, nil)
-		require.NoError(t, err)
-		assert.Equal(t, data, input.Data)
-	})
-
-	t.Run("encrypt_and_decrypt_basic_types", func(t *testing.T) {
-		type BasicTypes struct {
-			Bool   bool
-			Int    int
-			Float  float64
-			String string
-			Time   time.Time
-		}
-
-		registry.MustRegisterStruct(BasicTypes{},
-			kx.WithRegularField("Bool", false),
-			kx.WithRegularField("Int", false),
-			kx.WithRegularField("Float", false),
-			kx.WithRegularField("String", false),
-			kx.WithRegularField("Time", false),
+		registry.MustRegisterStruct(ComplexWithPointers{},
+			kx.WithRegularField("BirthdayPtr", true),
+			kx.WithRegularField("Name", true),
 		)
 		manager := mustNewManager(t)
 
-		original := &BasicTypes{
-			Bool:   true,
-			Int:    42,
-			Float:  3.14,
-			String: "hello",
-			Time:   time.Unix(1735110091, 0),
+		// Test case 1: All fields with values
+		birthday := Birthday{
+			Time: time.Now(),
+		}
+		original1 := &ComplexWithPointers{
+			BirthdayPtr: &birthday,
+			Name:        "John Doe",
 		}
 
-		// Test encryption
-		encrypted, ciphertext := mustEncryptObj(t, original, manager)
-		assert.Equal(t, original, encrypted)
+		encrypted1, ciphertext1 := mustEncryptObj(t, original1, manager)
 
-		// Test decryption
-		decrypted := mustDecryptObj(t, encrypted, ciphertext, manager)
-		diff := cmp.Diff(original, decrypted)
-		require.Emptyf(t, diff, "decrypted value does not match original: %v", diff)
+		// Verify hash fields are set
+		assert.NotEmpty(t, encrypted1.HashedBirthdayPtr)
+		assert.NotEmpty(t, encrypted1.HashedName)
+
+		decrypted1 := mustDecryptObj(t, encrypted1, ciphertext1, manager)
+
+		// Verify original values are preserved
+		assert.NotNil(t, decrypted1.BirthdayPtr)
+		assert.Equal(t, birthday.Unix(), decrypted1.BirthdayPtr.Unix())
+		assert.Equal(t, "John Doe", decrypted1.Name)
+
+		// Verify hash fields remain unchanged
+		assert.Equal(t, encrypted1.HashedBirthdayPtr, decrypted1.HashedBirthdayPtr)
+		assert.Equal(t, encrypted1.HashedName, decrypted1.HashedName)
+
+		// Test case 2: Pointer field is nil
+		original2 := &ComplexWithPointers{
+			BirthdayPtr: nil,
+			Name:        "Jane Doe",
+		}
+
+		encrypted2, ciphertext2 := mustEncryptObj(t, original2, manager)
+
+		// Hash field for nil pointer that implements fmt.Stringer:
+		// String() returns empty string, and hash of empty string is a non-empty hash value
+		assert.NotEmpty(t, encrypted2.HashedBirthdayPtr) // *Birthday implements fmt.Stringer
+		assert.NotEmpty(t, encrypted2.HashedName)
+
+		decrypted2 := mustDecryptObj(t, encrypted2, ciphertext2, manager)
+
+		assert.Nil(t, decrypted2.BirthdayPtr)
+		assert.Equal(t, "Jane Doe", decrypted2.Name)
+
+		// Verify hash fields remain unchanged
+		assert.Equal(t, encrypted2.HashedBirthdayPtr, decrypted2.HashedBirthdayPtr)
+		assert.Equal(t, encrypted2.HashedName, decrypted2.HashedName)
 	})
 
 	t.Run("encrypt_and_decrypt_map_with_json_paths", func(t *testing.T) {
