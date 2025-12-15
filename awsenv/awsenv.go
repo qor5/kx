@@ -102,6 +102,7 @@ func detectProjectRoot() (string, error) {
 	}
 
 	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}")
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
