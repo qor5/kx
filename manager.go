@@ -91,18 +91,31 @@ func (m *Manager) GetRegistry() *Registry {
 
 // processStruct handles the encryption/decryption of a single field
 func (m *Manager) processStruct(ps *parsedStruct, encData *EncryptedData, isEncrypt bool) error {
+	return m.processStructWithPrefix(ps, encData, isEncrypt, "")
+}
+
+// processStructWithPrefix handles encryption/decryption with a path prefix for nested structs
+func (m *Manager) processStructWithPrefix(ps *parsedStruct, encData *EncryptedData, isEncrypt bool, prefix string) error {
+	// For nested structs (prefix != ""), we need to clear fields after encryption
+	isNested := prefix != ""
+
 	// regular fields
 	for fieldName, shouldHash := range ps.Config.RegularFields {
 		fieldValue := ps.Value.FieldByName(fieldName)
+		keyName := prefixKey(prefix, fieldName)
 		if isEncrypt {
-			encData.RegularFields[fieldName] = fieldValue.Interface()
+			encData.RegularFields[keyName] = fieldValue.Interface()
 			if shouldHash {
 				if err := m.hashRegularField(fieldName, fieldValue, ps.Value); err != nil {
 					return err
 				}
 			}
+			// Clear field for nested structs (top-level fields are handled by clone)
+			if isNested {
+				fieldValue.Set(reflect.Zero(fieldValue.Type()))
+			}
 		} else {
-			if err := m.decryptRegularField(fieldName, fieldValue, encData); err != nil {
+			if err := m.decryptRegularFieldByKey(keyName, fieldValue, encData); err != nil {
 				return err
 			}
 		}
@@ -111,13 +124,14 @@ func (m *Manager) processStruct(ps *parsedStruct, encData *EncryptedData, isEncr
 	// json fields
 	for fieldName, jsonConfig := range ps.Config.JSONFields {
 		fieldValue := ps.Value.FieldByName(fieldName)
+		keyName := prefixKey(prefix, fieldName)
 		if isEncrypt {
 			if len(jsonConfig.HashPaths) > 0 {
 				if err := m.hashJSONField(fieldName, fieldValue, jsonConfig.HashPaths); err != nil {
 					return err
 				}
 			}
-			if err := m.encryptJSONField(fieldName, fieldValue, encData, jsonConfig.EncryptPaths); err != nil {
+			if err := m.encryptJSONFieldByKey(keyName, fieldValue, encData, jsonConfig.EncryptPaths); err != nil {
 				return err
 			}
 		} else {
@@ -126,13 +140,115 @@ func (m *Manager) processStruct(ps *parsedStruct, encData *EncryptedData, isEncr
 					return err
 				}
 			}
-			if err := m.decryptJSONField(fieldName, fieldValue, encData); err != nil {
+			if err := m.decryptJSONFieldByKey(keyName, fieldValue, encData); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Process nested structs and slices recursively
+	for i := 0; i < ps.Value.NumField(); i++ {
+		field := ps.Value.Field(i)
+		fieldType := ps.Value.Type().Field(i)
+		fieldName := fieldType.Name
+
+		// Skip unexported fields
+		if !field.CanSet() {
+			continue
+		}
+
+		// Skip fields already processed as regular or JSON fields
+		if _, ok := ps.Config.RegularFields[fieldName]; ok {
+			continue
+		}
+		if _, ok := ps.Config.JSONFields[fieldName]; ok {
+			continue
+		}
+
+		if err := m.processNestedField(field, fieldName, encData, isEncrypt, prefix); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// processNestedField handles nested structs and slices/arrays of structs
+func (m *Manager) processNestedField(fieldValue reflect.Value, fieldName string, encData *EncryptedData, isEncrypt bool, prefix string) error {
+	// Dereference pointer if needed
+	if fieldValue.Kind() == reflect.Ptr {
+		if fieldValue.IsNil() {
+			return nil
+		}
+		fieldValue = fieldValue.Elem()
+	}
+
+	newPrefix := prefixKey(prefix, fieldName)
+
+	switch fieldValue.Kind() {
+	case reflect.Struct:
+		// Check if this struct type is registered
+		elemType := fieldValue.Type()
+		config := m.registry.structConfigs[elemType]
+		if config == nil {
+			return nil // Not registered, skip
+		}
+		nestedPS := &parsedStruct{
+			Value:      fieldValue,
+			PtrToValue: fieldValue.Addr(),
+			Config:     config,
+		}
+		return m.processStructWithPrefix(nestedPS, encData, isEncrypt, newPrefix)
+
+	case reflect.Slice, reflect.Array:
+		// Check if element type is a registered struct
+		elemType := fieldValue.Type().Elem()
+		// Handle pointer to struct
+		if elemType.Kind() == reflect.Ptr {
+			elemType = elemType.Elem()
+		}
+		if elemType.Kind() != reflect.Struct {
+			return nil // Not a struct slice, skip
+		}
+
+		// Check if the element struct type is registered
+		elemConfig := m.registry.structConfigs[elemType]
+		if elemConfig == nil {
+			return nil // Element type not registered, skip
+		}
+
+		// Process each element
+		for i := 0; i < fieldValue.Len(); i++ {
+			elem := fieldValue.Index(i)
+			elemVal := elem
+			// Dereference pointer if needed
+			if elemVal.Kind() == reflect.Ptr {
+				if elemVal.IsNil() {
+					continue
+				}
+				elemVal = elemVal.Elem()
+			}
+			elemPrefix := fmt.Sprintf("%s.%d", newPrefix, i)
+			nestedPS := &parsedStruct{
+				Value:      elemVal,
+				PtrToValue: elemVal.Addr(),
+				Config:     elemConfig,
+			}
+			if err := m.processStructWithPrefix(nestedPS, encData, isEncrypt, elemPrefix); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// prefixKey creates a key with optional prefix
+func prefixKey(prefix, key string) string {
+	if prefix == "" {
+		return key
+	}
+	return prefix + "." + key
 }
 
 func (m *Manager) HashVal(val any) (string, error) {
@@ -226,9 +342,14 @@ func (m *Manager) removeFieldFromJSON(fieldName string, fieldValue reflect.Value
 	return nil
 }
 
-// decryptRegularField decrypts an entirely encrypted field
+// decryptRegularField decrypts an entirely encrypted field (for backward compatibility)
 func (m *Manager) decryptRegularField(fieldName string, fieldValue reflect.Value, encData *EncryptedData) error {
-	encryptedValue, ok := encData.RegularFields[fieldName]
+	return m.decryptRegularFieldByKey(fieldName, fieldValue, encData)
+}
+
+// decryptRegularFieldByKey decrypts an entirely encrypted field using a key
+func (m *Manager) decryptRegularFieldByKey(key string, fieldValue reflect.Value, encData *EncryptedData) error {
+	encryptedValue, ok := encData.RegularFields[key]
 	if !ok {
 		return nil // field not found in encrypted data, skip
 	}
@@ -249,30 +370,35 @@ func (m *Manager) decryptRegularField(fieldName string, fieldValue reflect.Value
 	// For complex types, try JSON unmarshaling
 	jsonData, err := json.Marshal(encryptedValue)
 	if err != nil {
-		return errors.Errorf("failed to marshal field %s: %v", fieldName, err)
+		return errors.Errorf("failed to marshal field %s: %v", key, err)
 	}
 
 	newValue := reflect.New(fieldValue.Type())
 	if err := json.Unmarshal(jsonData, newValue.Interface()); err != nil {
-		return errors.Errorf("failed to unmarshal field %s: %v", fieldName, err)
+		return errors.Errorf("failed to unmarshal field %s: %v", key, err)
 	}
 
 	fieldValue.Set(newValue.Elem())
 	return nil
 }
 
-// encryptJSONField encrypts specific paths within a JSON field
+// encryptJSONField encrypts specific paths within a JSON field (for backward compatibility)
 func (m *Manager) encryptJSONField(fieldName string, fieldValue reflect.Value, encData *EncryptedData, paths []string) (err error) {
+	return m.encryptJSONFieldByKey(fieldName, fieldValue, encData, paths)
+}
+
+// encryptJSONFieldByKey encrypts specific paths within a JSON field using a key prefix
+func (m *Manager) encryptJSONFieldByKey(keyPrefix string, fieldValue reflect.Value, encData *EncryptedData, paths []string) (err error) {
 	if len(paths) == 0 {
 		return nil
 	}
 	jsonBytes := fieldValue.Bytes()
-	if err := m.validateJSONBytes(fieldName, jsonBytes); err != nil {
+	if err := m.validateJSONBytes(keyPrefix, jsonBytes); err != nil {
 		return err
 	}
 	for _, path := range paths {
 		if result := gjson.GetBytes(jsonBytes, path); result.Exists() {
-			encData.JSONFields[fieldName+"."+path] = json.RawMessage(result.Raw)
+			encData.JSONFields[keyPrefix+"."+path] = json.RawMessage(result.Raw)
 			jsonBytes, err = sjson.DeleteBytes(jsonBytes, path)
 			if err != nil {
 				return errors.Wrapf(err, "failed to delete JSON value at path %s", path)
@@ -283,14 +409,19 @@ func (m *Manager) encryptJSONField(fieldName string, fieldValue reflect.Value, e
 	return nil
 }
 
-// decryptJSONField decrypt encrypted paths within a JSON field
+// decryptJSONField decrypt encrypted paths within a JSON field (for backward compatibility)
 func (m *Manager) decryptJSONField(fieldName string, fieldValue reflect.Value, encData *EncryptedData) error {
+	return m.decryptJSONFieldByKey(fieldName, fieldValue, encData)
+}
+
+// decryptJSONFieldByKey decrypt encrypted paths within a JSON field using a key prefix
+func (m *Manager) decryptJSONFieldByKey(keyPrefix string, fieldValue reflect.Value, encData *EncryptedData) error {
 	jsonBytes := fieldValue.Bytes()
 	if !gjson.ValidBytes(jsonBytes) {
 		jsonBytes = []byte("{}")
 	}
 
-	prefix := fieldName + "."
+	prefix := keyPrefix + "."
 	for path, value := range encData.JSONFields {
 		if !strings.HasPrefix(path, prefix) {
 			continue
