@@ -440,19 +440,31 @@ func (m *Manager) decryptJSONFieldByKey(keyPrefix string, fieldValue reflect.Val
 
 // parsedStruct holds the parsed struct information
 type parsedStruct struct {
-	Value      reflect.Value
-	PtrToValue reflect.Value
-	Type       reflect.Type
-	Config     *StructConfig
+	Value        reflect.Value
+	PtrToValue   reflect.Value
+	Type         reflect.Type
+	Config       *StructConfig
+	InputIsValue bool // true if original input was value type (not pointer)
 }
 
 func (m *Manager) parse(obj any) (*parsedStruct, error) {
 	val := reflect.ValueOf(obj)
-	if val.Kind() != reflect.Ptr {
-		return nil, errors.New(fmt.Sprintf("value must be a pointer to struct, got %T", obj))
-	}
-	if val.Elem().Kind() != reflect.Struct {
-		return nil, errors.New(fmt.Sprintf("value must be a pointer to struct, got %T", obj))
+	inputIsValue := false
+
+	// Support both value type and pointer type
+	if val.Kind() == reflect.Struct {
+		// Value type: create a pointer to it for clone
+		inputIsValue = true
+		ptr := reflect.New(val.Type())
+		ptr.Elem().Set(val)
+		val = ptr
+		obj = val.Interface()
+	} else if val.Kind() == reflect.Ptr {
+		if val.Elem().Kind() != reflect.Struct {
+			return nil, errors.Errorf("value must be a struct or pointer to struct, got %T", obj)
+		}
+	} else {
+		return nil, errors.Errorf("value must be a struct or pointer to struct, got %T", obj)
 	}
 
 	config := m.registry.GetStructConfig(obj)
@@ -463,9 +475,10 @@ func (m *Manager) parse(obj any) (*parsedStruct, error) {
 	clonedObj := clone.Clone(obj)
 	val = reflect.ValueOf(clonedObj)
 	return &parsedStruct{
-		Value:      reflect.Indirect(val),
-		PtrToValue: val,
-		Config:     config,
+		Value:        reflect.Indirect(val),
+		PtrToValue:   val,
+		Config:       config,
+		InputIsValue: inputIsValue,
 	}, nil
 }
 
@@ -506,6 +519,10 @@ func EncryptStruct[T any](ctx context.Context, m *Manager, obj T, encryptionCont
 		return zeroValue, "", err
 	}
 
+	// Return value type or pointer type based on original input
+	if ps.InputIsValue {
+		return ps.Value.Interface().(T), ciphertext, nil
+	}
 	return ps.PtrToValue.Interface().(T), ciphertext, nil
 }
 
@@ -577,6 +594,10 @@ func DecryptStruct[T any](ctx context.Context, m *Manager, encryptedObj T, ciphe
 		return zeroValue, err
 	}
 
+	// Return value type or pointer type based on original input
+	if ps.InputIsValue {
+		return ps.Value.Interface().(T), nil
+	}
 	return ps.PtrToValue.Interface().(T), nil
 }
 

@@ -123,10 +123,10 @@ func TestManager(t *testing.T) {
 
 		// Test non-pointer input
 		_, _, err := manager.EncryptStruct(ctx, "not a struct", nil)
-		assert.Contains(t, err.Error(), "value must be a pointer to struct, got string")
+		assert.Contains(t, err.Error(), "value must be a struct or pointer to struct, got string")
 
 		_, err = manager.DecryptStruct(ctx, 42, "ciphertext", nil)
-		assert.Contains(t, err.Error(), "value must be a pointer")
+		assert.Contains(t, err.Error(), "value must be a struct or pointer to struct")
 
 		_, err = manager.DecryptStruct(ctx, 20, "", nil)
 		assert.Contains(t, err.Error(), "ciphertext is required")
@@ -141,9 +141,37 @@ func TestManager(t *testing.T) {
 		// Test pointer to non-struct
 		var nonStruct *int
 		_, _, err = manager.EncryptStruct(ctx, nonStruct, nil)
-		assert.ErrorContains(t, err, "value must be a pointer to struct, got *int")
+		assert.ErrorContains(t, err, "value must be a struct or pointer to struct, got *int")
 
 		// TODO: storage field cannot set
+	})
+
+	t.Run("value_type_input", func(t *testing.T) {
+		type ValueTypeStruct struct {
+			Name       string
+			HashedName string
+		}
+		registry.MustRegisterStruct(ValueTypeStruct{}, kx.WithRegularField("Name", true))
+		manager := mustNewManager(t)
+
+		// Test encrypt with value type (not pointer)
+		original := ValueTypeStruct{
+			Name: "test value",
+		}
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, ciphertext)
+		assert.Equal(t, "test value", encrypted.Name) // Top-level fields are not cleared
+		assert.NotEmpty(t, encrypted.HashedName)
+
+		// Verify original is not modified
+		assert.Equal(t, "test value", original.Name)
+
+		// Test decrypt with value type
+		decrypted, err := kx.DecryptStruct(ctx, manager, encrypted, ciphertext, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test value", decrypted.Name)
+		assert.Equal(t, encrypted.HashedName, decrypted.HashedName)
 	})
 
 	t.Run("empty_encrypted_data", func(t *testing.T) {
