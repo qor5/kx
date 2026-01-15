@@ -609,3 +609,302 @@ func TestManager_Hash(t *testing.T) {
 		assert.Equal(t, "secret123", decrypted.Password)
 	})
 }
+
+// TestManager_NestedStruct tests encryption/decryption of nested structs
+func TestManager_NestedStruct(t *testing.T) {
+	t.Run("nested_struct", func(t *testing.T) {
+		type Inner struct {
+			Secret string
+		}
+		type Outer struct {
+			Name  string
+			Inner Inner
+		}
+
+		registry, _ := kx.NewRegistry()
+		registry.MustRegisterStruct(Inner{}, kx.WithRegularField("Secret", false))
+		registry.MustRegisterStruct(Outer{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Outer{
+			Name: "test",
+			Inner: Inner{
+				Secret: "my-secret-value",
+			},
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test", encrypted.Name)
+		assert.Empty(t, encrypted.Inner.Secret) // Should be cleared in encrypted object
+
+		decrypted, err := kx.DecryptStruct(ctx, manager, encrypted, ciphertext, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test", decrypted.Name)
+		assert.Equal(t, "my-secret-value", decrypted.Inner.Secret)
+	})
+
+	t.Run("nested_struct_pointer", func(t *testing.T) {
+		type Inner struct {
+			Secret string
+		}
+		type Outer struct {
+			Name  string
+			Inner *Inner
+		}
+
+		registry, _ := kx.NewRegistry()
+		registry.MustRegisterStruct(Inner{}, kx.WithRegularField("Secret", false))
+		registry.MustRegisterStruct(Outer{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Outer{
+			Name: "test",
+			Inner: &Inner{
+				Secret: "my-secret-value",
+			},
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test", encrypted.Name)
+		require.NotNil(t, encrypted.Inner)
+		assert.Empty(t, encrypted.Inner.Secret)
+
+		decrypted, err := kx.DecryptStruct(ctx, manager, encrypted, ciphertext, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test", decrypted.Name)
+		require.NotNil(t, decrypted.Inner)
+		assert.Equal(t, "my-secret-value", decrypted.Inner.Secret)
+	})
+
+	t.Run("nested_struct_nil_pointer", func(t *testing.T) {
+		type Inner struct {
+			Secret string
+		}
+		type Outer struct {
+			Name  string
+			Inner *Inner
+		}
+
+		registry, _ := kx.NewRegistry()
+		registry.MustRegisterStruct(Inner{}, kx.WithRegularField("Secret", false))
+		registry.MustRegisterStruct(Outer{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Outer{
+			Name:  "test",
+			Inner: nil,
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test", encrypted.Name)
+		assert.Nil(t, encrypted.Inner)
+		// No encrypted fields, so ciphertext is empty - skip decryption test
+		assert.Empty(t, ciphertext)
+	})
+}
+
+// TestManager_SliceOfStructs tests encryption/decryption of slices containing structs
+func TestManager_SliceOfStructs(t *testing.T) {
+	t.Run("slice_of_structs", func(t *testing.T) {
+		type Provider struct {
+			ID           string
+			ClientSecret string
+		}
+		type Config struct {
+			Name      string
+			Providers []Provider
+		}
+
+		registry, _ := kx.NewRegistry()
+		registry.MustRegisterStruct(Provider{}, kx.WithRegularField("ClientSecret", false))
+		registry.MustRegisterStruct(Config{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Config{
+			Name: "my-config",
+			Providers: []Provider{
+				{ID: "google", ClientSecret: "google-secret"},
+				{ID: "github", ClientSecret: "github-secret"},
+				{ID: "microsoft", ClientSecret: "microsoft-secret"},
+			},
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "my-config", encrypted.Name)
+		require.Len(t, encrypted.Providers, 3)
+		// Verify secrets are cleared
+		assert.Equal(t, "google", encrypted.Providers[0].ID)
+		assert.Empty(t, encrypted.Providers[0].ClientSecret)
+		assert.Equal(t, "github", encrypted.Providers[1].ID)
+		assert.Empty(t, encrypted.Providers[1].ClientSecret)
+		assert.Equal(t, "microsoft", encrypted.Providers[2].ID)
+		assert.Empty(t, encrypted.Providers[2].ClientSecret)
+
+		decrypted, err := kx.DecryptStruct(ctx, manager, encrypted, ciphertext, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "my-config", decrypted.Name)
+		require.Len(t, decrypted.Providers, 3)
+		// Verify secrets are restored
+		assert.Equal(t, "google", decrypted.Providers[0].ID)
+		assert.Equal(t, "google-secret", decrypted.Providers[0].ClientSecret)
+		assert.Equal(t, "github", decrypted.Providers[1].ID)
+		assert.Equal(t, "github-secret", decrypted.Providers[1].ClientSecret)
+		assert.Equal(t, "microsoft", decrypted.Providers[2].ID)
+		assert.Equal(t, "microsoft-secret", decrypted.Providers[2].ClientSecret)
+	})
+
+	t.Run("slice_of_struct_pointers", func(t *testing.T) {
+		type Provider struct {
+			ID           string
+			ClientSecret string
+		}
+		type Config struct {
+			Name      string
+			Providers []*Provider
+		}
+
+		registry, _ := kx.NewRegistry()
+		registry.MustRegisterStruct(Provider{}, kx.WithRegularField("ClientSecret", false))
+		registry.MustRegisterStruct(Config{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Config{
+			Name: "my-config",
+			Providers: []*Provider{
+				{ID: "google", ClientSecret: "google-secret"},
+				{ID: "github", ClientSecret: "github-secret"},
+			},
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "my-config", encrypted.Name)
+		require.Len(t, encrypted.Providers, 2)
+		assert.Empty(t, encrypted.Providers[0].ClientSecret)
+		assert.Empty(t, encrypted.Providers[1].ClientSecret)
+
+		decrypted, err := kx.DecryptStruct(ctx, manager, encrypted, ciphertext, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "my-config", decrypted.Name)
+		require.Len(t, decrypted.Providers, 2)
+		assert.Equal(t, "google-secret", decrypted.Providers[0].ClientSecret)
+		assert.Equal(t, "github-secret", decrypted.Providers[1].ClientSecret)
+	})
+
+	t.Run("empty_slice", func(t *testing.T) {
+		type Provider struct {
+			ID           string
+			ClientSecret string
+		}
+		type Config struct {
+			Name      string
+			Providers []Provider
+		}
+
+		registry, _ := kx.NewRegistry()
+		registry.MustRegisterStruct(Provider{}, kx.WithRegularField("ClientSecret", false))
+		registry.MustRegisterStruct(Config{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Config{
+			Name:      "my-config",
+			Providers: []Provider{},
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "my-config", encrypted.Name)
+		assert.Empty(t, encrypted.Providers)
+		// No encrypted fields (empty slice), so ciphertext is empty - skip decryption test
+		assert.Empty(t, ciphertext)
+	})
+
+	t.Run("multiple_sensitive_fields", func(t *testing.T) {
+		type Provider struct {
+			ID           string
+			ClientSecret string
+			PrivateKey   string
+		}
+		type Config struct {
+			Name      string
+			Providers []Provider
+		}
+
+		registry, _ := kx.NewRegistry()
+		registry.MustRegisterStruct(Provider{},
+			kx.WithRegularField("ClientSecret", false),
+			kx.WithRegularField("PrivateKey", false),
+		)
+		registry.MustRegisterStruct(Config{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Config{
+			Name: "my-config",
+			Providers: []Provider{
+				{ID: "apple", ClientSecret: "apple-secret", PrivateKey: "apple-key"},
+				{ID: "google", ClientSecret: "google-secret", PrivateKey: ""},
+			},
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Empty(t, encrypted.Providers[0].ClientSecret)
+		assert.Empty(t, encrypted.Providers[0].PrivateKey)
+		assert.Empty(t, encrypted.Providers[1].ClientSecret)
+		assert.Empty(t, encrypted.Providers[1].PrivateKey)
+
+		decrypted, err := kx.DecryptStruct(ctx, manager, encrypted, ciphertext, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "apple-secret", decrypted.Providers[0].ClientSecret)
+		assert.Equal(t, "apple-key", decrypted.Providers[0].PrivateKey)
+		assert.Equal(t, "google-secret", decrypted.Providers[1].ClientSecret)
+		assert.Equal(t, "", decrypted.Providers[1].PrivateKey)
+	})
+}
+
+// TestManager_UnregisteredNestedStruct tests that unregistered nested structs are skipped
+func TestManager_UnregisteredNestedStruct(t *testing.T) {
+	t.Run("unregistered_nested_struct_skipped", func(t *testing.T) {
+		type Inner struct {
+			Secret string
+		}
+		type Outer struct {
+			Name  string
+			Inner Inner
+		}
+
+		registry, _ := kx.NewRegistry()
+		// Only register Outer, not Inner
+		registry.MustRegisterStruct(Outer{})
+		manager := mustNewManagerWithRegistry(t, registry)
+
+		original := &Outer{
+			Name: "test",
+			Inner: Inner{
+				Secret: "my-secret-value",
+			},
+		}
+
+		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test", encrypted.Name)
+		// Inner.Secret should NOT be encrypted since Inner is not registered
+		assert.Equal(t, "my-secret-value", encrypted.Inner.Secret)
+		// No encrypted fields, so ciphertext is empty
+		assert.Empty(t, ciphertext)
+	})
+}
+
+func mustNewManagerWithRegistry(t *testing.T, registry *kx.Registry) *kx.Manager {
+	cipherFactory := mock.NewCipherFactory()
+	hashKey := getHashKey(t)
+	hashFactory, err := xhmac.NewHashFactory(hashKey)
+	require.NoError(t, err)
+	manager, err := kx.NewManager(cipherFactory, hashFactory, registry)
+	require.NoError(t, err)
+	return manager
+}
