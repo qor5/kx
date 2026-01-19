@@ -96,9 +96,6 @@ func (m *Manager) processStruct(ps *parsedStruct, encData *EncryptedData, isEncr
 
 // processStructWithPrefix handles encryption/decryption with a path prefix for nested structs
 func (m *Manager) processStructWithPrefix(ps *parsedStruct, encData *EncryptedData, isEncrypt bool, prefix string) error {
-	// For nested structs (prefix != ""), we need to clear fields after encryption
-	isNested := prefix != ""
-
 	// regular fields
 	for fieldName, shouldHash := range ps.Config.RegularFields {
 		fieldValue := ps.Value.FieldByName(fieldName)
@@ -110,10 +107,8 @@ func (m *Manager) processStructWithPrefix(ps *parsedStruct, encData *EncryptedDa
 					return err
 				}
 			}
-			// Clear field for nested structs (top-level fields are handled by clone)
-			if isNested {
-				fieldValue.Set(reflect.Zero(fieldValue.Type()))
-			}
+			// Clear sensitive field after encryption (both top-level and nested)
+			fieldValue.Set(reflect.Zero(fieldValue.Type()))
 		} else {
 			if err := m.decryptRegularFieldByKey(keyName, fieldValue, encData); err != nil {
 				return err

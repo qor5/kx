@@ -161,7 +161,7 @@ func TestManager(t *testing.T) {
 		encrypted, ciphertext, err := kx.EncryptStruct(ctx, manager, original, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, ciphertext)
-		assert.Equal(t, "test value", encrypted.Name) // Top-level fields are not cleared
+		assert.Empty(t, encrypted.Name) // Sensitive field should be cleared after encryption
 		assert.NotEmpty(t, encrypted.HashedName)
 
 		// Verify original is not modified
@@ -469,7 +469,8 @@ func TestManager_Hash(t *testing.T) {
 
 		encrypted, ciphertext := mustEncryptObj(t, original, manager)
 		assert.NotEmpty(t, encrypted.HashedPassword)
-		assert.Equal(t, "mypassword123", encrypted.Password)
+		// Sensitive field should be cleared after encryption
+		assert.Empty(t, encrypted.Password)
 
 		// Test decryption
 		decrypted := mustDecryptObj(t, encrypted, ciphertext, manager)
