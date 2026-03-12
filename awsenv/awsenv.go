@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gofrs/flock"
 	godotenv "github.com/joho/godotenv"
@@ -18,6 +19,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
+const defaultTimeout = 10 * time.Second
+
+// Option configures the behavior of Ensure.
+type Option func(*options)
+
+type options struct {
+	timeout time.Duration
+}
+
+// WithTimeout sets the overall timeout for Ensure. Default is 10s.
+func WithTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.timeout = d
+	}
+}
+
 // Ensure makes sure AWS credentials are available in the current process.
 // It guarantees reading/writing `.aws.env` only at the project root (module dir from `go list`),
 // validates credentials via STS, and refreshes them via `oidc2aws` if needed.
@@ -27,13 +44,35 @@ import (
 //   - QOR_AWS_REGION: AWS region to write if refreshing (default: ap-northeast-1)
 //   - QOR_OIDC2AWS_ALIAS: oidc2aws alias (default: qor5-test)
 //   - QOR_AWSENV_FORCE_REFRESH: if true-like, force refresh even if valid
-func Ensure(ctx context.Context) error {
+func Ensure(ctx context.Context, opts ...Option) error {
 	// Skip entirely in GitHub CI environments
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("GITHUB_ACTIONS")), "true") {
 		return nil
 	}
 
-	projectRoot, err := detectProjectRoot()
+	o := &options{timeout: defaultTimeout}
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, o.timeout)
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- doEnsure(ctx)
+	}()
+
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return errors.Errorf("awsenv.Ensure timed out after %s: your network connection may have issues or AWS/oidc2aws services are unreachable", o.timeout)
+	}
+}
+
+func doEnsure(ctx context.Context) error {
+	projectRoot, err := detectProjectRoot(ctx)
 	if err != nil {
 		return err
 	}
@@ -53,9 +92,13 @@ func Ensure(ctx context.Context) error {
 
 	lockPath := envFilePath + ".lock"
 	fileLock := flock.New(lockPath)
-	// Block until lock is acquired; minimal code path, acceptable for test bootstrap
-	if err := fileLock.Lock(); err != nil {
+	// Try to acquire lock with context so it respects the timeout
+	locked, err := fileLock.TryLockContext(ctx, 200*time.Millisecond)
+	if err != nil {
 		return errors.WithMessage(err, "failed to acquire awsenv lock")
+	}
+	if !locked {
+		return errors.New("failed to acquire awsenv lock: context cancelled")
 	}
 	defer func() {
 		_ = fileLock.Unlock()
@@ -72,7 +115,7 @@ func Ensure(ctx context.Context) error {
 	alias := lo.Ternary(strings.TrimSpace(os.Getenv("QOR_OIDC2AWS_ALIAS")) == "", "qor5-test", os.Getenv("QOR_OIDC2AWS_ALIAS"))
 	region := lo.Ternary(strings.TrimSpace(os.Getenv("QOR_AWS_REGION")) == "", "ap-northeast-1", os.Getenv("QOR_AWS_REGION"))
 
-	content, err := runOidc2aws(alias)
+	content, err := runOidc2aws(ctx, alias)
 	if err != nil {
 		return err
 	}
@@ -93,7 +136,7 @@ func Ensure(ctx context.Context) error {
 
 // detectProjectRoot gets the main module directory using the Go toolchain.
 // Order: QOR_PROJECT_ROOT override -> `go list -m -f {{.Dir}}` -> error if empty/failed.
-func detectProjectRoot() (string, error) {
+func detectProjectRoot(ctx context.Context) (string, error) {
 	if root := strings.TrimSpace(os.Getenv("QOR_PROJECT_ROOT")); root != "" {
 		if stat, err := os.Stat(root); err == nil && stat.IsDir() {
 			return root, nil
@@ -101,7 +144,7 @@ func detectProjectRoot() (string, error) {
 		return "", errors.New("QOR_PROJECT_ROOT is not a valid directory")
 	}
 
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}")
+	cmd := exec.CommandContext(ctx, "go", "list", "-m", "-f", "{{.Dir}}")
 	cmd.Env = append(os.Environ(), "GOWORK=off")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -133,8 +176,8 @@ func validateAWSCredentials(ctx context.Context) error {
 }
 
 // runOidc2aws executes `oidc2aws -login -alias <alias> --env` and returns its stdout.
-func runOidc2aws(alias string) (string, error) {
-	cmd := exec.Command("oidc2aws", "-login", "-alias", alias, "--env")
+func runOidc2aws(ctx context.Context, alias string) (string, error) {
+	cmd := exec.CommandContext(ctx, "oidc2aws", "-login", "-alias", alias, "--env")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
