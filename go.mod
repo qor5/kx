@@ -1,6 +1,6 @@
 module github.com/qor5/kx
 
-go 1.25.8
+go 1.24.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.39.0
