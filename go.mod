@@ -43,7 +43,7 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/huandu/go-clone v1.7.3 // indirect
-	github.com/jackc/pgx/v5 v5.7.6 // indirect
+	github.com/jackc/pgx/v5 v5.9.2 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/jjeffery/errors v1.0.3 // indirect
