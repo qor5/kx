@@ -14,6 +14,7 @@ require (
 	github.com/theplant/appkit v0.0.0-20251216060755-5c38a5ab9c14
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
+	golang.org/x/sync v0.21.0
 	golang.org/x/text v0.37.0
 	gorm.io/datatypes v1.2.7
 )
