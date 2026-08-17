@@ -94,6 +94,21 @@ leaves ciphertext that the running code cannot decrypt.
   encrypt/decrypt and ~200 extra bytes per row. `WithSigning(true)` restores the
   Encryption SDK's default if a threat model calls for it; the suite is recorded
   per message, so both kinds stay readable and can coexist in one table.
+- **Concurrent envelope operations trip `-race`.** The Encryption SDK and the
+  material providers library are transpiled from Dafny, and their generated
+  constructors initialise sequence fields from the Dafny runtime's package-level
+  `EmptySeq` singleton — `New_KmsGenerateAndWrapKeyMaterial_` runs
+  `_dafny.EmptySeq.SetString()` on every encrypt, decrypt, and keyring
+  construction. Two goroutines doing envelope crypto at once race on that word.
+  Every reported access to it is a write of the constant `true` and there is no
+  reader, so results stay correct; giving your goroutines separate
+  `CipherFactory` values does not help, since the state belongs to the runtime.
+  Silencing it would mean putting every KMS round trip behind one process-wide
+  lock, which this package does not do — `DecryptStructs` fans out
+  `DefaultDecryptConcurrency` calls and that throughput is worth more than a
+  warning about a write that cannot change a value. If a downstream suite runs
+  `-race` over concurrent envelope operations, this is what it will report. The
+  bare KMS path never enters that code and is unaffected.
 - **KMS sees the full encryption context.** Requiring the context keeps them out
   of the message header but not out of the `GenerateDataKey` / `Decrypt` calls, so
   a `kms:EncryptionContext:<key>` IAM condition key can still be used to narrow

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -295,6 +296,81 @@ func TestNewCipherFactory_EnvelopeWriteRequiresKeyARN(t *testing.T) {
 	t.Run("key ARN is accepted", func(t *testing.T) {
 		_, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
 		require.NoError(t, err)
+	})
+}
+
+// TestCipherFactory_Concurrent backs the concurrency-safety promise in
+// CipherFactory's doc comment: concurrent envelope operations produce correct
+// results.
+//
+// It deliberately asserts on results rather than running under -race. The
+// Encryption SDK's transpiled Dafny code races on a package-level singleton by
+// writing the constant true to it, with no reader anywhere (see CipherFactory's
+// doc comment), so -race here would report upstream's write and prove nothing
+// about this package. What can go wrong and stay invisible is a wrong plaintext,
+// which is what these assertions catch.
+//
+// Two shapes: goroutines sharing one factory (what DecryptStructs does), and
+// goroutines each building their own.
+func TestCipherFactory_Concurrent(t *testing.T) {
+	const goroutines = 16
+
+	t.Run("shared factory", func(t *testing.T) {
+		fake := newFakeKMS()
+		factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		seeds := make([][]byte, goroutines)
+		for i := range seeds {
+			seeds[i], err = factory.Encrypt(ctx, []byte("hello"), reservationContext(strconv.Itoa(i)))
+			require.NoError(t, err)
+		}
+
+		var wg sync.WaitGroup
+		for i := range seeds {
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				_, err := factory.Encrypt(ctx, []byte("hello"), reservationContext(strconv.Itoa(i)))
+				assert.NoError(t, err)
+			}()
+			go func() {
+				defer wg.Done()
+				got, err := factory.Decrypt(ctx, seeds[i], reservationContext(strconv.Itoa(i)))
+				if assert.NoError(t, err) {
+					assert.Equal(t, "hello", string(got))
+				}
+			}()
+		}
+		wg.Wait()
+	})
+
+	t.Run("one factory per goroutine", func(t *testing.T) {
+		fake := newFakeKMS()
+		ctx := context.Background()
+
+		var wg sync.WaitGroup
+		for i := range goroutines {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+				if !assert.NoError(t, err) {
+					return
+				}
+				encCtx := reservationContext(strconv.Itoa(i))
+				ciphertext, err := factory.Encrypt(ctx, []byte("hello"), encCtx)
+				if !assert.NoError(t, err) {
+					return
+				}
+				got, err := factory.Decrypt(ctx, ciphertext, encCtx)
+				if assert.NoError(t, err) {
+					assert.Equal(t, "hello", string(got))
+				}
+			}()
+		}
+		wg.Wait()
 	})
 }
 
