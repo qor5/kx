@@ -71,6 +71,15 @@ Step 2 must land before step 3. Without the permission, `Encrypt` fails with
 Because step 1 ships the reader ahead of the writer, rolling step 3 back never
 leaves ciphertext that the running code cannot decrypt.
 
+One consequence to be clear about, since "we have not enabled envelope writes"
+is easy to read as "we are still on the old path": `Decrypt` routes on the
+ciphertext's prefix, not on `WithEnvelopeWrite`. That is what makes the ordering
+above work, but it also means that **from the moment any instance writes the
+first envelope row, every instance that reads it is on the envelope path** — and
+subject to everything below — no matter what its own flag says. The notes that
+follow apply whenever envelope rows exist anywhere, not only to the replicas
+doing the writing.
+
 ## Notes
 
 - **Encryption context is required authenticated data.** `awskms` inherits

@@ -467,6 +467,51 @@ func TestCipherFactory_DeadlineBoundsTheCall(t *testing.T) {
 	assert.NotErrorAs(t, err, &invalid)
 }
 
+// TestReaderWithoutEnvelopeWriteStillTakesTheEnvelopePath pins something easy to
+// get wrong when reasoning about the rollout: "we have not enabled envelope
+// writes" does not mean "we are on the legacy path".
+//
+// Decrypt routes on the ciphertext's prefix, not on the envelopeWrite setting,
+// which is exactly what makes the rollout order work — readers deploy first and
+// must handle rows a writer produces later. The consequence is that as soon as
+// any instance writes an envelope row, every instance reading it is on the
+// envelope path and inherits its behaviour, whatever its own flag says.
+func TestReaderWithoutEnvelopeWriteStillTakesTheEnvelopePath(t *testing.T) {
+	fake := newFakeKMS()
+	encCtx := reservationContext("r1")
+
+	writer, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+	envelopeRow, err := writer.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	// A plain reader: envelope writes off, the default.
+	reader, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN)
+	require.NoError(t, err)
+
+	legacyRow, err := reader.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+	require.EqualValues(t, 0x01, legacyRow[0], "a reader must still write legacy ciphertexts")
+
+	t.Run("it reads the envelope row", func(t *testing.T) {
+		got, err := reader.Decrypt(context.Background(), envelopeRow, encCtx)
+		require.NoError(t, err)
+		assert.Equal(t, "secret", string(got))
+	})
+
+	// The error contract has to hold for this reader too, or a KMS outage marks
+	// envelope rows as broken on instances that never opted into anything.
+	t.Run("a KMS outage is not a ciphertext problem for it either", func(t *testing.T) {
+		fake.failTransportAlways("Decrypt", stderrors.New("dial tcp: connect: connection refused"))
+		defer func() { fake.failTransport = map[string]error{} }()
+
+		_, err := reader.Decrypt(context.Background(), envelopeRow, encCtx)
+		require.Error(t, err)
+		var invalid *api.InvalidCiphertextError
+		assert.NotErrorAs(t, err, &invalid)
+	})
+}
+
 func TestNewCipherFactory_RequiresKeyID(t *testing.T) {
 	_, err := esdk.NewCipherFactory(newFakeKMS().awsConfig(), "")
 	require.Error(t, err)
