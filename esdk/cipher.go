@@ -69,6 +69,28 @@ func NewCipherFactory(cfg aws.Config, keyID string, opts ...Option) (*CipherFact
 		return nil, err
 	}
 
+	f := &CipherFactory{keyID: keyID, legacy: legacy}
+	for _, opt := range opts {
+		opt(f)
+	}
+
+	// The Encryption SDK's KMS keyring checks, on decrypt, that the key ARN
+	// recorded in the message is one it was configured with. An alias never
+	// matches that ARN, so a factory built from an alias can encrypt but then
+	// cannot read back what it wrote. Refuse at construction instead of letting
+	// unreadable rows reach the database.
+	//
+	// Only enforced when envelope writes are on: with them off this factory
+	// behaves exactly like awskms, which resolves aliases server-side and is
+	// unaffected. That keeps merely adopting the package inert for deployments
+	// still configured with an alias.
+	if f.envelopeWrite && !isKeyARN(keyID) {
+		return nil, errors.Errorf(
+			"envelope encryption requires a KMS key ARN, got %q: the Encryption SDK matches the "+
+				"key ARN stored in each message against this value on decrypt, and an alias can never "+
+				"match it (aws kms describe-key --key-id %s --query KeyMetadata.Arn)", keyID, keyID)
+	}
+
 	mplc, err := mplclient.NewClient(mpltypes.MaterialProvidersConfig{})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create material providers client")
@@ -96,17 +118,10 @@ func NewCipherFactory(cfg aws.Config, keyID string, opts ...Option) (*CipherFact
 		return nil, errors.Wrap(err, "failed to create encryption sdk client")
 	}
 
-	f := &CipherFactory{
-		keyID:      keyID,
-		esdkClient: esdkc,
-		mplClient:  mplc,
-		keyring:    keyring,
-		defaultCMM: defaultCMM,
-		legacy:     legacy,
-	}
-	for _, opt := range opts {
-		opt(f)
-	}
+	f.esdkClient = esdkc
+	f.mplClient = mplc
+	f.keyring = keyring
+	f.defaultCMM = defaultCMM
 	return f, nil
 }
 
@@ -250,4 +265,10 @@ func (f *CipherFactory) appendSpanKVs(ctx context.Context, encryptionContext map
 		kvs = append(kvs, "kms.enc_ctx."+k, v)
 	}
 	logtracing.AppendSpanKVs(ctx, kvs...)
+}
+
+// isKeyARN reports whether keyID is a KMS key ARN rather than an alias, an alias
+// ARN, or a bare key id.
+func isKeyARN(keyID string) bool {
+	return strings.HasPrefix(keyID, "arn:") && strings.Contains(keyID, ":key/")
 }

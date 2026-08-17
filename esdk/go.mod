@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.51.1
 	github.com/aws/smithy-go v1.25.1
 	github.com/pkg/errors v0.9.1
-	github.com/qor5/kx v0.0.0
+	github.com/qor5/kx v0.0.0-20260713082723-dc32af6f8fd6
 	github.com/stretchr/testify v1.11.1
 	github.com/theplant/appkit v0.0.0-20251216060755-5c38a5ab9c14
 )

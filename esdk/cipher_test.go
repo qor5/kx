@@ -259,6 +259,45 @@ func TestCipherFactory_ClassifiesErrors(t *testing.T) {
 	})
 }
 
+// TestNewCipherFactory_EnvelopeWriteRequiresKeyARN covers a trap the Encryption
+// SDK sets: its keyring matches the key ARN recorded in a message against the
+// configured key on decrypt, so an alias encrypts fine and then cannot read back
+// what it wrote. Failing at construction keeps unreadable rows out of the
+// database.
+//
+// The check is scoped to envelope writes so that adopting this package stays
+// inert for deployments still configured with an alias — awskms resolves aliases
+// server-side and does not care.
+func TestNewCipherFactory_EnvelopeWriteRequiresKeyARN(t *testing.T) {
+	fake := newFakeKMS()
+	const alias = "alias/mad-test-biz-pii"
+
+	t.Run("envelope write rejects an alias", func(t *testing.T) {
+		_, err := esdk.NewCipherFactory(fake.awsConfig(), alias, esdk.WithEnvelopeWrite(true))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ARN")
+	})
+
+	t.Run("alias still works without envelope writes", func(t *testing.T) {
+		factory, err := esdk.NewCipherFactory(fake.awsConfig(), alias)
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		encCtx := reservationContext("r1")
+		ciphertext, err := factory.Encrypt(ctx, []byte("hello"), encCtx)
+		require.NoError(t, err)
+
+		got, err := factory.Decrypt(ctx, ciphertext, encCtx)
+		require.NoError(t, err)
+		assert.Equal(t, "hello", string(got))
+	})
+
+	t.Run("key ARN is accepted", func(t *testing.T) {
+		_, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+		require.NoError(t, err)
+	})
+}
+
 func TestNewCipherFactory_RequiresKeyID(t *testing.T) {
 	_, err := esdk.NewCipherFactory(newFakeKMS().awsConfig(), "")
 	require.Error(t, err)
