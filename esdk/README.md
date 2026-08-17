@@ -94,6 +94,15 @@ leaves ciphertext that the running code cannot decrypt.
   encrypt/decrypt and ~200 extra bytes per row. `WithSigning(true)` restores the
   Encryption SDK's default if a threat model calls for it; the suite is recorded
   per message, so both kinds stay readable and can coexist in one table.
+- **A deadline bounds the wait, not the KMS call.** The Encryption SDK accepts a
+  context and then drops it: measured against a fake KMS held at 300ms with a
+  50ms deadline, the call returned success after the full 300ms and the outbound
+  request's context had never been cancelled. `Encrypt` and `Decrypt` therefore
+  return as soon as the context is done, which is what keeps a KMS stall from
+  pinning an HTTP handler or a batch worker. The abandoned KMS round trip still
+  runs to completion in the background and its result is discarded — actually
+  cancelling it needs the SDK to propagate the context. The bare KMS path has no
+  such gap, since there the AWS SDK gets the caller's context directly.
 - **Concurrent envelope operations trip `-race`.** The Encryption SDK and the
   material providers library are transpiled from Dafny, and their generated
   constructors initialise sequence fields from the Dafny runtime's package-level

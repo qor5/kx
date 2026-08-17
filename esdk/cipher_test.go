@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -423,6 +424,45 @@ func TestCipherFactory_HonoursCancelledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 
 	// A cancelled context must not be reported as a data problem.
+	var invalid *api.InvalidCiphertextError
+	assert.NotErrorAs(t, err, &invalid)
+}
+
+// TestCipherFactory_DeadlineBoundsTheCall is the one that matters for a service:
+// the Encryption SDK drops the context it is given, so a caller's deadline stops
+// bounding envelope work. Measured before the fix, a 50ms deadline against a
+// 300ms KMS round trip returned success after the full 300ms.
+//
+// Returning promptly is all this can do. The KMS call itself is not cancelled —
+// that needs the SDK to propagate the context — but the caller is no longer
+// pinned to it, which is what keeps a KMS stall from holding an HTTP handler.
+func TestCipherFactory_DeadlineBoundsTheCall(t *testing.T) {
+	const (
+		roundTrip = 300 * time.Millisecond
+		deadline  = 50 * time.Millisecond
+	)
+
+	fake := newFakeKMS()
+	factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+
+	encCtx := reservationContext("r1")
+	ciphertext, err := factory.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	fake.delay(roundTrip)
+
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+
+	start := time.Now()
+	_, err = factory.Decrypt(ctx, ciphertext, encCtx)
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, elapsed, roundTrip, "Decrypt must return on the deadline, not when KMS finishes")
+
+	// A deadline is an infrastructure condition, not a row whose data is broken.
 	var invalid *api.InvalidCiphertextError
 	assert.NotErrorAs(t, err, &invalid)
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -57,6 +58,9 @@ type fakeKMS struct {
 	// below the protocol layer — no KMS response at all, the way a dead
 	// connection or a DNS failure presents.
 	failTransport map[string]error
+
+	// latency, when set, delays every response.
+	latency time.Duration
 }
 
 type sealed struct {
@@ -117,6 +121,14 @@ func (f *fakeKMS) failTransportAlways(op string, err error) {
 	f.failTransport[op] = err
 }
 
+// delay makes every subsequent request take d, standing in for a slow or
+// stalled KMS.
+func (f *fakeKMS) delay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.latency = d
+}
+
 func (f *fakeKMS) RoundTrip(req *http.Request) (*http.Response, error) {
 	target := req.Header.Get("X-Amz-Target")
 	op := target[strings.LastIndex(target, ".")+1:]
@@ -140,6 +152,7 @@ func (f *fakeKMS) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	f.calls[op]++
 	f.contexts[op] = append(f.contexts[op], maps.Clone(in.EncryptionContext))
+	latency := f.latency
 	if e, ok := f.failTransport[op]; ok {
 		f.mu.Unlock()
 		return nil, e
@@ -150,6 +163,13 @@ func (f *fakeKMS) RoundTrip(req *http.Request) (*http.Response, error) {
 		return errorResponse(e), nil
 	}
 	f.mu.Unlock()
+
+	if latency > 0 {
+		// Deliberately not selecting on req.Context(): the point of the deadline
+		// test is that the Encryption SDK never cancels this request, so the fake
+		// must not do it either.
+		time.Sleep(latency)
+	}
 
 	switch op {
 	case "Encrypt":

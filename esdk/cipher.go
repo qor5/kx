@@ -165,28 +165,22 @@ func (f *CipherFactory) NewDecrypter() api.Decrypter {
 	return f
 }
 
-// Encrypt seals plaintext, writing an envelope ciphertext when envelope writes
-// are enabled and a bare KMS ciphertext otherwise.
-//
-// The ctx.Err() check exists because the Encryption SDK ignores the context: a
-// cancelled one still reaches KMS and still comes back with a result, whereas
-// awskms stops. Checking on the way in keeps the two paths alike and skips a
-// pointless KMS call for work that has already been abandoned — DecryptStructs
-// runs under errgroup.WithContext, so the first failure in a batch cancels every
-// sibling. It cannot interrupt a call already in flight; that would need the SDK
-// to propagate the context.
 func (f *CipherFactory) Encrypt(
 	ctx context.Context, plaintext []byte, encryptionContext map[string]string,
 ) (ciphertext []byte, err error) {
 	if !f.envelopeWrite {
 		return f.legacy.Encrypt(ctx, plaintext, encryptionContext)
 	}
+
+	// Spans first: an abandoned attempt should still show up in a trace, which is
+	// what the legacy path does — the AWS SDK is what fails there, after awskms
+	// has recorded the span.
+	f.appendSpanKVs(ctx, encryptionContext)
+	logtracing.AppendSpanKVs(ctx, "kms.envelope", true)
+
 	if err := ctx.Err(); err != nil {
 		return nil, errors.WithStack(err)
 	}
-
-	f.appendSpanKVs(ctx, encryptionContext)
-	logtracing.AppendSpanKVs(ctx, "kms.envelope", true)
 
 	cmm, err := f.materialsManager(ctx, encryptionContext)
 	if err != nil {
@@ -205,7 +199,9 @@ func (f *CipherFactory) Encrypt(
 		in.Keyring = f.keyring
 	}
 
-	out, err := f.esdkClient.Encrypt(ctx, in)
+	out, err := awaitCtx(ctx, func() (*esdktypes.EncryptOutput, error) {
+		return f.esdkClient.Encrypt(ctx, in)
+	})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to encrypt data")
 	}
@@ -218,12 +214,13 @@ func (f *CipherFactory) Decrypt(
 	if !hasEnvelopePrefix(ciphertext) {
 		return f.legacy.Decrypt(ctx, ciphertext, encryptionContext)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, errors.WithStack(err)
-	}
 
 	f.appendSpanKVs(ctx, encryptionContext)
 	logtracing.AppendSpanKVs(ctx, "kms.envelope", true)
+
+	if err := ctx.Err(); err != nil {
+		return nil, errors.WithStack(err)
+	}
 
 	cmm, err := f.materialsManager(ctx, encryptionContext)
 	if err != nil {
@@ -240,11 +237,50 @@ func (f *CipherFactory) Decrypt(
 		in.Keyring = f.keyring
 	}
 
-	out, err := f.esdkClient.Decrypt(ctx, in)
+	out, err := awaitCtx(ctx, func() (*esdktypes.DecryptOutput, error) {
+		return f.esdkClient.Decrypt(ctx, in)
+	})
 	if err != nil {
 		return nil, classifyDecryptError(err)
 	}
 	return out.Plaintext, nil
+}
+
+// awaitCtx runs fn and stops waiting for it once ctx is done.
+//
+// The Encryption SDK accepts a context and then drops it. Measured against a
+// fake KMS held at 300ms with a 50ms deadline: the call returned success after
+// the full 300ms, and the outbound request's context had never been cancelled —
+// so the SDK hands KMS a context of its own, and a caller's deadline stops
+// bounding envelope work entirely. awskms has no such gap, because there the AWS
+// SDK gets the caller's context directly.
+//
+// That gap is what pins a goroutine. Without this, a KMS stall holds whatever is
+// waiting — an HTTP handler, a batch worker — for as long as KMS takes, however
+// short the request's own deadline was.
+//
+// ponytail: this lets the caller leave; it does not interrupt the work. The
+// abandoned goroutine runs to completion and its result is dropped on the floor,
+// with the buffered channel keeping it from leaking. Cancelling the round trip
+// itself needs the SDK to propagate the context.
+func awaitCtx[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	type result struct {
+		out T
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		out, err := fn()
+		ch <- result{out: out, err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.out, r.err
+	case <-ctx.Done():
+		var zero T
+		return zero, errors.WithStack(ctx.Err())
+	}
 }
 
 // algorithmSuiteID returns the suite to encrypt with. Both options commit to the
