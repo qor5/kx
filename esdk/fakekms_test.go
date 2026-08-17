@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,11 @@ type fakeKMS struct {
 	// calls counts requests per KMS operation.
 	calls map[string]int
 
+	// contexts records the encryption context of every request per operation, so
+	// tests can assert on what KMS itself was told rather than only on what came
+	// back out.
+	contexts map[string][]map[string]string
+
 	// failNext, when set for an operation, makes the next call to it return
 	// this error instead of a result.
 	failNext map[string]kmsError
@@ -63,8 +69,16 @@ func newFakeKMS() *fakeKMS {
 	return &fakeKMS{
 		blobs:    map[string]sealed{},
 		calls:    map[string]int{},
+		contexts: map[string][]map[string]string{},
 		failNext: map[string]kmsError{},
 	}
+}
+
+// contextsFor returns the encryption contexts KMS was called with for op.
+func (f *fakeKMS) contextsFor(op string) []map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.contexts[op])
 }
 
 // awsConfig returns a config whose HTTP client is this fake.
@@ -110,6 +124,7 @@ func (f *fakeKMS) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	f.mu.Lock()
 	f.calls[op]++
+	f.contexts[op] = append(f.contexts[op], maps.Clone(in.EncryptionContext))
 	if e, ok := f.failNext[op]; ok {
 		delete(f.failNext, op)
 		f.mu.Unlock()

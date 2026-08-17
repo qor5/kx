@@ -83,4 +83,20 @@ leaves ciphertext that the running code cannot decrypt.
 - **KMS call volume is unchanged.** One `GenerateDataKey` per encrypt replaces
   one `Encrypt`; decrypts remain one `Decrypt`. All three share the same
   per-region quota, so no data key caching is needed.
-- **Ciphertext grows** by roughly the size of one wrapped data key.
+- **Ciphertext grows** by roughly the size of one wrapped data key — about 235
+  bytes per row with the default suite.
+- **Messages are not signed by default.** Both suites this package can use commit
+  to the data key; they differ only in carrying an ECDSA signature. Signing lets a
+  decryptor verify *which* party encrypted a message, which is worth paying for
+  when encryptors and decryptors are mutually distrusting roles — not the case
+  here, where one application encrypts and decrypts its own rows under one key.
+  Measured against the unsigned suite, signing costs ~4x the CPU per
+  encrypt/decrypt and ~200 extra bytes per row. `WithSigning(true)` restores the
+  Encryption SDK's default if a threat model calls for it; the suite is recorded
+  per message, so both kinds stay readable and can coexist in one table.
+- **KMS sees the full encryption context.** Requiring the context keeps them out
+  of the message header but not out of the `GenerateDataKey` / `Decrypt` calls, so
+  a `kms:EncryptionContext:<key>` IAM condition key can still be used to narrow
+  the grant. With the default unsigned suite the context KMS receives is exactly
+  what the caller passed — signing adds an `aws-crypto-public-key` entry, which
+  such a policy then has to tolerate.

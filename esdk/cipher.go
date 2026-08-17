@@ -42,6 +42,7 @@ type CipherFactory struct {
 	legacy *awskms.CipherFactory
 
 	envelopeWrite bool
+	signing       bool
 
 	// cmms memoises one materials manager per set of encryption-context keys.
 	// Construction is local but not free, and in practice a process sees only a
@@ -134,9 +135,11 @@ func (f *CipherFactory) Encrypt(
 		return nil, err
 	}
 
+	suite := f.algorithmSuiteID()
 	in := esdktypes.EncryptInput{
 		Plaintext:         plaintext,
 		EncryptionContext: encryptionContext,
+		AlgorithmSuiteId:  &suite,
 	}
 	if cmm != nil {
 		in.MaterialsManager = cmm
@@ -181,6 +184,17 @@ func (f *CipherFactory) Decrypt(
 		return nil, classifyDecryptError(err)
 	}
 	return out.Plaintext, nil
+}
+
+// algorithmSuiteID returns the suite to encrypt with. Both options commit to the
+// data key, as REQUIRE_ENCRYPT_REQUIRE_DECRYPT demands; see WithSigning for why
+// the unsigned one is the default. Decryption never consults this — the suite is
+// recorded in each message, so messages written under either one stay readable.
+func (f *CipherFactory) algorithmSuiteID() mpltypes.ESDKAlgorithmSuiteId {
+	if f.signing {
+		return mpltypes.ESDKAlgorithmSuiteIdAlgAes256GcmHkdfSha512CommitKeyEcdsaP384
+	}
+	return mpltypes.ESDKAlgorithmSuiteIdAlgAes256GcmHkdfSha512CommitKey
 }
 
 // materialsManager returns a materials manager that binds every
