@@ -52,6 +52,11 @@ type fakeKMS struct {
 	// failNext, when set for an operation, makes the next call to it return
 	// this error instead of a result.
 	failNext map[string]kmsError
+
+	// failTransport, when set for an operation, makes the next call to it fail
+	// below the protocol layer — no KMS response at all, the way a dead
+	// connection or a DNS failure presents.
+	failTransport map[string]error
 }
 
 type sealed struct {
@@ -67,10 +72,11 @@ type kmsError struct {
 
 func newFakeKMS() *fakeKMS {
 	return &fakeKMS{
-		blobs:    map[string]sealed{},
-		calls:    map[string]int{},
-		contexts: map[string][]map[string]string{},
-		failNext: map[string]kmsError{},
+		blobs:         map[string]sealed{},
+		calls:         map[string]int{},
+		contexts:      map[string][]map[string]string{},
+		failNext:      map[string]kmsError{},
+		failTransport: map[string]error{},
 	}
 }
 
@@ -102,6 +108,15 @@ func (f *fakeKMS) failOnce(op string, e kmsError) {
 	f.failNext[op] = e
 }
 
+// failTransportAlways makes every call to op fail without a KMS response, the
+// way an unreachable endpoint does. Not once: the AWS SDK retries transport
+// failures, so a single injected error would be papered over.
+func (f *fakeKMS) failTransportAlways(op string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failTransport[op] = err
+}
+
 func (f *fakeKMS) RoundTrip(req *http.Request) (*http.Response, error) {
 	target := req.Header.Get("X-Amz-Target")
 	op := target[strings.LastIndex(target, ".")+1:]
@@ -125,6 +140,10 @@ func (f *fakeKMS) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	f.calls[op]++
 	f.contexts[op] = append(f.contexts[op], maps.Clone(in.EncryptionContext))
+	if e, ok := f.failTransport[op]; ok {
+		f.mu.Unlock()
+		return nil, e
+	}
 	if e, ok := f.failNext[op]; ok {
 		delete(f.failNext, op)
 		f.mu.Unlock()

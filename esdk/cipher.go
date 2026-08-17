@@ -165,11 +165,24 @@ func (f *CipherFactory) NewDecrypter() api.Decrypter {
 	return f
 }
 
+// Encrypt seals plaintext, writing an envelope ciphertext when envelope writes
+// are enabled and a bare KMS ciphertext otherwise.
+//
+// The ctx.Err() check exists because the Encryption SDK ignores the context: a
+// cancelled one still reaches KMS and still comes back with a result, whereas
+// awskms stops. Checking on the way in keeps the two paths alike and skips a
+// pointless KMS call for work that has already been abandoned — DecryptStructs
+// runs under errgroup.WithContext, so the first failure in a batch cancels every
+// sibling. It cannot interrupt a call already in flight; that would need the SDK
+// to propagate the context.
 func (f *CipherFactory) Encrypt(
 	ctx context.Context, plaintext []byte, encryptionContext map[string]string,
 ) (ciphertext []byte, err error) {
 	if !f.envelopeWrite {
 		return f.legacy.Encrypt(ctx, plaintext, encryptionContext)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.WithStack(err)
 	}
 
 	f.appendSpanKVs(ctx, encryptionContext)
@@ -204,6 +217,9 @@ func (f *CipherFactory) Decrypt(
 ) (plaintext []byte, err error) {
 	if !hasEnvelopePrefix(ciphertext) {
 		return f.legacy.Decrypt(ctx, ciphertext, encryptionContext)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.WithStack(err)
 	}
 
 	f.appendSpanKVs(ctx, encryptionContext)

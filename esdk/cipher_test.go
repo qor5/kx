@@ -2,6 +2,7 @@ package esdk_test
 
 import (
 	"context"
+	stderrors "errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -244,6 +245,28 @@ func TestCipherFactory_ClassifiesErrors(t *testing.T) {
 		assert.NotErrorAs(t, err, &invalid, "an authorization failure must not be reported as invalid ciphertext")
 	})
 
+	// The regression that matters operationally: awskms reports only KMS's own
+	// InvalidCiphertextException as an invalid ciphertext and passes everything
+	// else through, so a caller treating api.InvalidCiphertextError as "this row
+	// is unrecoverable" is safe during an outage. A catch-all in the Encryption
+	// SDK's classifier would quietly turn every KMS blip into a batch of rows
+	// marked beyond repair.
+	t.Run("transport failure is not a ciphertext problem", func(t *testing.T) {
+		fake := newFakeKMS()
+		factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+		require.NoError(t, err)
+
+		ciphertext, err := factory.Encrypt(ctx, []byte("secret"), encCtx)
+		require.NoError(t, err)
+
+		fake.failTransportAlways("Decrypt", stderrors.New("dial tcp: connect: connection refused"))
+
+		_, err = factory.Decrypt(ctx, ciphertext, encCtx)
+		require.Error(t, err)
+		var invalid *api.InvalidCiphertextError
+		assert.NotErrorAs(t, err, &invalid, "an unreachable KMS must not be reported as invalid ciphertext")
+	})
+
 	t.Run("corrupt ciphertext is a ciphertext problem", func(t *testing.T) {
 		fake := newFakeKMS()
 		factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
@@ -372,6 +395,36 @@ func TestCipherFactory_Concurrent(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+// TestCipherFactory_HonoursCancelledContext pins a difference from awskms that
+// would otherwise be silent: the Encryption SDK ignores the context it is
+// handed, so without the guard in Encrypt/Decrypt a cancelled request still
+// calls KMS and still returns a plaintext. awskms fails with "context
+// canceled", and callers that set a deadline or abandon a batch expect that.
+func TestCipherFactory_HonoursCancelledContext(t *testing.T) {
+	fake := newFakeKMS()
+	factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+
+	encCtx := reservationContext("r1")
+	ciphertext, err := factory.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	before := fake.callCount("Decrypt")
+	_, err = factory.Decrypt(cancelled, ciphertext, encCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, before, fake.callCount("Decrypt"), "an abandoned decrypt must not reach KMS")
+
+	_, err = factory.Encrypt(cancelled, []byte("secret"), encCtx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	// A cancelled context must not be reported as a data problem.
+	var invalid *api.InvalidCiphertextError
+	assert.NotErrorAs(t, err, &invalid)
 }
 
 func TestNewCipherFactory_RequiresKeyID(t *testing.T) {
