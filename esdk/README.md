@@ -103,15 +103,25 @@ doing the writing.
   encrypt/decrypt and ~200 extra bytes per row. `WithSigning(true)` restores the
   Encryption SDK's default if a threat model calls for it; the suite is recorded
   per message, so both kinds stay readable and can coexist in one table.
-- **A deadline bounds the wait, not the KMS call.** The Encryption SDK accepts a
+- **Set a timeout on `aws.Config.HTTPClient`.** The Encryption SDK accepts a
   context and then drops it: measured against a fake KMS held at 300ms with a
   50ms deadline, the call returned success after the full 300ms and the outbound
-  request's context had never been cancelled. `Encrypt` and `Decrypt` therefore
-  return as soon as the context is done, which is what keeps a KMS stall from
-  pinning an HTTP handler or a batch worker. The abandoned KMS round trip still
-  runs to completion in the background and its result is discarded — actually
-  cancelling it needs the SDK to propagate the context. The bare KMS path has no
-  such gap, since there the AWS SDK gets the caller's context directly.
+  request's context had never been cancelled. A context that is already done on
+  the way in is honoured, but one that expires mid-call is not — so on the
+  envelope path a caller's deadline does not bound the work, and the bare KMS
+  path's protection (where the AWS SDK gets the context directly) is absent.
+
+  What still bounds it is `http.Client.Timeout`, which is enforced below the SDK.
+  It is worth setting explicitly, because aws-sdk-go-v2's default client sets no
+  overall timeout at all — only a 30s dial and a 10s TLS handshake — so a KMS
+  that accepts the connection and then goes quiet is waited on indefinitely. Note
+  the bound is *per attempt*: with the default retryer a 100ms timeout measured
+  ~4.7s in total across three attempts and their backoff. Size it accordingly.
+
+  kx deliberately does not paper over this by running the SDK call in a goroutine
+  of its own and returning when the context fires. That would let the caller
+  leave without stopping the work, removing the backpressure that currently keeps
+  a stalled KMS from being retried into a pile of abandoned in-flight calls.
 - **Concurrent envelope operations trip `-race`.** The Encryption SDK and the
   material providers library are transpiled from Dafny, and their generated
   constructors initialise sequence fields from the Dafny runtime's package-level

@@ -3,6 +3,7 @@ package esdk_test
 import (
 	"context"
 	stderrors "errors"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -428,15 +429,20 @@ func TestCipherFactory_HonoursCancelledContext(t *testing.T) {
 	assert.NotErrorAs(t, err, &invalid)
 }
 
-// TestCipherFactory_DeadlineBoundsTheCall is the one that matters for a service:
-// the Encryption SDK drops the context it is given, so a caller's deadline stops
-// bounding envelope work. Measured before the fix, a 50ms deadline against a
-// 300ms KMS round trip returned success after the full 300ms.
+// TestCipherFactory_DeadlineDoesNotInterruptTheSDK pins a limitation rather than
+// a guarantee, because a caller reading only the doc comment would assume the
+// opposite.
 //
-// Returning promptly is all this can do. The KMS call itself is not cancelled —
-// that needs the SDK to propagate the context — but the caller is no longer
-// pinned to it, which is what keeps a KMS stall from holding an HTTP handler.
-func TestCipherFactory_DeadlineBoundsTheCall(t *testing.T) {
+// The Encryption SDK accepts a context and hands KMS one of its own, so a
+// deadline that expires mid-call does not stop the work: this returns after the
+// full round trip, with a result. kx cannot fix that from the outside without
+// abandoning the SDK call to a goroutine of its own, which trades a bounded wait
+// for an unbounded pile-up of abandoned work under exactly the conditions that
+// cause it — see the README note for what callers should do instead.
+//
+// A context that is already done on the way in *is* honoured; that is
+// TestCipherFactory_HonoursCancelledContext.
+func TestCipherFactory_DeadlineDoesNotInterruptTheSDK(t *testing.T) {
 	const (
 		roundTrip = 300 * time.Millisecond
 		deadline  = 50 * time.Millisecond
@@ -456,15 +462,79 @@ func TestCipherFactory_DeadlineBoundsTheCall(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err = factory.Decrypt(ctx, ciphertext, encCtx)
+	got, err := factory.Decrypt(ctx, ciphertext, encCtx)
 	elapsed := time.Since(start)
 
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Less(t, elapsed, roundTrip, "Decrypt must return on the deadline, not when KMS finishes")
+	require.NoError(t, err, "the SDK ignores the deadline, so this still succeeds")
+	assert.Equal(t, "secret", string(got))
+	assert.GreaterOrEqual(t, elapsed, roundTrip,
+		"the call runs to completion; if this ever fails, the SDK started honouring the context")
+}
 
-	// A deadline is an infrastructure condition, not a row whose data is broken.
+// TestCipherFactory_HTTPClientTimeoutBoundsTheCall is the ceiling callers
+// actually have, and the reason kx does not spawn a goroutine to impose one.
+//
+// http.Client.Timeout is enforced below the SDK, so it bounds envelope work even
+// though the context does not. Without it there is no ceiling at all:
+// aws-sdk-go-v2's default client sets no overall timeout, only a 30s dial and a
+// 10s TLS handshake, so a KMS that accepts the connection and then goes quiet is
+// waited on indefinitely.
+//
+// Retries are capped at one attempt here to keep the test fast and
+// deterministic. In production the ceiling is per attempt, so the real bound is
+// roughly timeout x attempts plus exponential backoff — measured at ~4.7s for a
+// 100ms timeout under the default retryer. Finite and predictable, which the
+// default is not.
+func TestCipherFactory_HTTPClientTimeoutBoundsTheCall(t *testing.T) {
+	const (
+		stall         = 5 * time.Second
+		clientTimeout = 100 * time.Millisecond
+	)
+
+	writerFake := newFakeKMS()
+	writer, err := esdk.NewCipherFactory(writerFake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+	encCtx := reservationContext("r1")
+	ciphertext, err := writer.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	fake := newFakeKMS()
+	cfg := fake.awsConfig()
+	cfg.HTTPClient = &http.Client{
+		Transport: stallingTransport{fake, stall},
+		Timeout:   clientTimeout,
+	}
+	cfg.RetryMaxAttempts = 1
+
+	factory, err := esdk.NewCipherFactory(cfg, testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+
+	start := time.Now()
+	_, err = factory.Decrypt(context.Background(), ciphertext, encCtx)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Less(t, elapsed, stall/2, "http.Client.Timeout must bound the call, not the KMS stall")
+
+	// And it is an infrastructure failure, not a row with broken data.
 	var invalid *api.InvalidCiphertextError
 	assert.NotErrorAs(t, err, &invalid)
+}
+
+// stallingTransport holds a request open like a KMS that accepted the connection
+// and then went quiet — the case aws-sdk-go-v2 has no default timeout for.
+type stallingTransport struct {
+	fake *fakeKMS
+	d    time.Duration
+}
+
+func (t stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	select {
+	case <-time.After(t.d):
+		return t.fake.RoundTrip(req)
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
 }
 
 // TestReaderWithoutEnvelopeWriteStillTakesTheEnvelopePath pins something easy to

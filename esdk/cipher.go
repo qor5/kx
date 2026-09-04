@@ -199,9 +199,7 @@ func (f *CipherFactory) Encrypt(
 		in.Keyring = f.keyring
 	}
 
-	out, err := awaitCtx(ctx, func() (*esdktypes.EncryptOutput, error) {
-		return f.esdkClient.Encrypt(ctx, in)
-	})
+	out, err := f.esdkClient.Encrypt(ctx, in)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to encrypt data")
 	}
@@ -237,50 +235,11 @@ func (f *CipherFactory) Decrypt(
 		in.Keyring = f.keyring
 	}
 
-	out, err := awaitCtx(ctx, func() (*esdktypes.DecryptOutput, error) {
-		return f.esdkClient.Decrypt(ctx, in)
-	})
+	out, err := f.esdkClient.Decrypt(ctx, in)
 	if err != nil {
 		return nil, classifyDecryptError(err)
 	}
 	return out.Plaintext, nil
-}
-
-// awaitCtx runs fn and stops waiting for it once ctx is done.
-//
-// The Encryption SDK accepts a context and then drops it. Measured against a
-// fake KMS held at 300ms with a 50ms deadline: the call returned success after
-// the full 300ms, and the outbound request's context had never been cancelled —
-// so the SDK hands KMS a context of its own, and a caller's deadline stops
-// bounding envelope work entirely. awskms has no such gap, because there the AWS
-// SDK gets the caller's context directly.
-//
-// That gap is what pins a goroutine. Without this, a KMS stall holds whatever is
-// waiting — an HTTP handler, a batch worker — for as long as KMS takes, however
-// short the request's own deadline was.
-//
-// ponytail: this lets the caller leave; it does not interrupt the work. The
-// abandoned goroutine runs to completion and its result is dropped on the floor,
-// with the buffered channel keeping it from leaking. Cancelling the round trip
-// itself needs the SDK to propagate the context.
-func awaitCtx[T any](ctx context.Context, fn func() (T, error)) (T, error) {
-	type result struct {
-		out T
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		out, err := fn()
-		ch <- result{out: out, err: err}
-	}()
-
-	select {
-	case r := <-ch:
-		return r.out, r.err
-	case <-ctx.Done():
-		var zero T
-		return zero, errors.WithStack(ctx.Err())
-	}
 }
 
 // algorithmSuiteID returns the suite to encrypt with. Both options commit to the
