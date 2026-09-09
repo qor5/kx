@@ -2,9 +2,13 @@ package esdk_test
 
 import (
 	"context"
+	stderrors "errors"
+	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -243,6 +247,28 @@ func TestCipherFactory_ClassifiesErrors(t *testing.T) {
 		assert.NotErrorAs(t, err, &invalid, "an authorization failure must not be reported as invalid ciphertext")
 	})
 
+	// The regression that matters operationally: awskms reports only KMS's own
+	// InvalidCiphertextException as an invalid ciphertext and passes everything
+	// else through, so a caller treating api.InvalidCiphertextError as "this row
+	// is unrecoverable" is safe during an outage. A catch-all in the Encryption
+	// SDK's classifier would quietly turn every KMS blip into a batch of rows
+	// marked beyond repair.
+	t.Run("transport failure is not a ciphertext problem", func(t *testing.T) {
+		fake := newFakeKMS()
+		factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+		require.NoError(t, err)
+
+		ciphertext, err := factory.Encrypt(ctx, []byte("secret"), encCtx)
+		require.NoError(t, err)
+
+		fake.failTransportAlways("Decrypt", stderrors.New("dial tcp: connect: connection refused"))
+
+		_, err = factory.Decrypt(ctx, ciphertext, encCtx)
+		require.Error(t, err)
+		var invalid *api.InvalidCiphertextError
+		assert.NotErrorAs(t, err, &invalid, "an unreachable KMS must not be reported as invalid ciphertext")
+	})
+
 	t.Run("corrupt ciphertext is a ciphertext problem", func(t *testing.T) {
 		fake := newFakeKMS()
 		factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
@@ -295,6 +321,264 @@ func TestNewCipherFactory_EnvelopeWriteRequiresKeyARN(t *testing.T) {
 	t.Run("key ARN is accepted", func(t *testing.T) {
 		_, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
 		require.NoError(t, err)
+	})
+}
+
+// TestCipherFactory_Concurrent backs the concurrency-safety promise in
+// CipherFactory's doc comment: concurrent envelope operations produce correct
+// results.
+//
+// It deliberately asserts on results rather than running under -race. The
+// Encryption SDK's transpiled Dafny code races on a package-level singleton by
+// writing the constant true to it, with no reader anywhere (see CipherFactory's
+// doc comment), so -race here would report upstream's write and prove nothing
+// about this package. What can go wrong and stay invisible is a wrong plaintext,
+// which is what these assertions catch.
+//
+// Two shapes: goroutines sharing one factory (what DecryptStructs does), and
+// goroutines each building their own.
+func TestCipherFactory_Concurrent(t *testing.T) {
+	const goroutines = 16
+
+	t.Run("shared factory", func(t *testing.T) {
+		fake := newFakeKMS()
+		factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		seeds := make([][]byte, goroutines)
+		for i := range seeds {
+			seeds[i], err = factory.Encrypt(ctx, []byte("hello"), reservationContext(strconv.Itoa(i)))
+			require.NoError(t, err)
+		}
+
+		var wg sync.WaitGroup
+		for i := range seeds {
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				_, err := factory.Encrypt(ctx, []byte("hello"), reservationContext(strconv.Itoa(i)))
+				assert.NoError(t, err)
+			}()
+			go func() {
+				defer wg.Done()
+				got, err := factory.Decrypt(ctx, seeds[i], reservationContext(strconv.Itoa(i)))
+				if assert.NoError(t, err) {
+					assert.Equal(t, "hello", string(got))
+				}
+			}()
+		}
+		wg.Wait()
+	})
+
+	t.Run("one factory per goroutine", func(t *testing.T) {
+		fake := newFakeKMS()
+		ctx := context.Background()
+
+		var wg sync.WaitGroup
+		for i := range goroutines {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+				if !assert.NoError(t, err) {
+					return
+				}
+				encCtx := reservationContext(strconv.Itoa(i))
+				ciphertext, err := factory.Encrypt(ctx, []byte("hello"), encCtx)
+				if !assert.NoError(t, err) {
+					return
+				}
+				got, err := factory.Decrypt(ctx, ciphertext, encCtx)
+				if assert.NoError(t, err) {
+					assert.Equal(t, "hello", string(got))
+				}
+			}()
+		}
+		wg.Wait()
+	})
+}
+
+// TestCipherFactory_HonoursCancelledContext pins a difference from awskms that
+// would otherwise be silent: the Encryption SDK ignores the context it is
+// handed, so without the guard in Encrypt/Decrypt a cancelled request still
+// calls KMS and still returns a plaintext. awskms fails with "context
+// canceled", and callers that set a deadline or abandon a batch expect that.
+func TestCipherFactory_HonoursCancelledContext(t *testing.T) {
+	fake := newFakeKMS()
+	factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+
+	encCtx := reservationContext("r1")
+	ciphertext, err := factory.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	before := fake.callCount("Decrypt")
+	_, err = factory.Decrypt(cancelled, ciphertext, encCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, before, fake.callCount("Decrypt"), "an abandoned decrypt must not reach KMS")
+
+	_, err = factory.Encrypt(cancelled, []byte("secret"), encCtx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	// A cancelled context must not be reported as a data problem.
+	var invalid *api.InvalidCiphertextError
+	assert.NotErrorAs(t, err, &invalid)
+}
+
+// TestCipherFactory_DeadlineDoesNotInterruptTheSDK pins a limitation rather than
+// a guarantee, because a caller reading only the doc comment would assume the
+// opposite.
+//
+// The Encryption SDK accepts a context and hands KMS one of its own, so a
+// deadline that expires mid-call does not stop the work: this returns after the
+// full round trip, with a result. kx cannot fix that from the outside without
+// abandoning the SDK call to a goroutine of its own, which trades a bounded wait
+// for an unbounded pile-up of abandoned work under exactly the conditions that
+// cause it — see the README note for what callers should do instead.
+//
+// A context that is already done on the way in *is* honoured; that is
+// TestCipherFactory_HonoursCancelledContext.
+func TestCipherFactory_DeadlineDoesNotInterruptTheSDK(t *testing.T) {
+	const (
+		roundTrip = 300 * time.Millisecond
+		deadline  = 50 * time.Millisecond
+	)
+
+	fake := newFakeKMS()
+	factory, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+
+	encCtx := reservationContext("r1")
+	ciphertext, err := factory.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	fake.delay(roundTrip)
+
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+
+	start := time.Now()
+	got, err := factory.Decrypt(ctx, ciphertext, encCtx)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "the SDK ignores the deadline, so this still succeeds")
+	assert.Equal(t, "secret", string(got))
+	assert.GreaterOrEqual(t, elapsed, roundTrip,
+		"the call runs to completion; if this ever fails, the SDK started honouring the context")
+}
+
+// TestCipherFactory_HTTPClientTimeoutBoundsTheCall is the ceiling callers
+// actually have, and the reason kx does not spawn a goroutine to impose one.
+//
+// http.Client.Timeout is enforced below the SDK, so it bounds envelope work even
+// though the context does not. Without it there is no ceiling at all:
+// aws-sdk-go-v2's default client sets no overall timeout, only a 30s dial and a
+// 10s TLS handshake, so a KMS that accepts the connection and then goes quiet is
+// waited on indefinitely.
+//
+// Retries are capped at one attempt here to keep the test fast and
+// deterministic. In production the ceiling is per attempt, so the real bound is
+// roughly timeout x attempts plus exponential backoff — measured at ~4.7s for a
+// 100ms timeout under the default retryer. Finite and predictable, which the
+// default is not.
+func TestCipherFactory_HTTPClientTimeoutBoundsTheCall(t *testing.T) {
+	const (
+		stall         = 5 * time.Second
+		clientTimeout = 100 * time.Millisecond
+	)
+
+	writerFake := newFakeKMS()
+	writer, err := esdk.NewCipherFactory(writerFake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+	encCtx := reservationContext("r1")
+	ciphertext, err := writer.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	fake := newFakeKMS()
+	cfg := fake.awsConfig()
+	cfg.HTTPClient = &http.Client{
+		Transport: stallingTransport{fake, stall},
+		Timeout:   clientTimeout,
+	}
+	cfg.RetryMaxAttempts = 1
+
+	factory, err := esdk.NewCipherFactory(cfg, testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+
+	start := time.Now()
+	_, err = factory.Decrypt(context.Background(), ciphertext, encCtx)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Less(t, elapsed, stall/2, "http.Client.Timeout must bound the call, not the KMS stall")
+
+	// And it is an infrastructure failure, not a row with broken data.
+	var invalid *api.InvalidCiphertextError
+	assert.NotErrorAs(t, err, &invalid)
+}
+
+// stallingTransport holds a request open like a KMS that accepted the connection
+// and then went quiet — the case aws-sdk-go-v2 has no default timeout for.
+type stallingTransport struct {
+	fake *fakeKMS
+	d    time.Duration
+}
+
+func (t stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	select {
+	case <-time.After(t.d):
+		return t.fake.RoundTrip(req)
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+}
+
+// TestReaderWithoutEnvelopeWriteStillTakesTheEnvelopePath pins something easy to
+// get wrong when reasoning about the rollout: "we have not enabled envelope
+// writes" does not mean "we are on the legacy path".
+//
+// Decrypt routes on the ciphertext's prefix, not on the envelopeWrite setting,
+// which is exactly what makes the rollout order work — readers deploy first and
+// must handle rows a writer produces later. The consequence is that as soon as
+// any instance writes an envelope row, every instance reading it is on the
+// envelope path and inherits its behaviour, whatever its own flag says.
+func TestReaderWithoutEnvelopeWriteStillTakesTheEnvelopePath(t *testing.T) {
+	fake := newFakeKMS()
+	encCtx := reservationContext("r1")
+
+	writer, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN, esdk.WithEnvelopeWrite(true))
+	require.NoError(t, err)
+	envelopeRow, err := writer.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+
+	// A plain reader: envelope writes off, the default.
+	reader, err := esdk.NewCipherFactory(fake.awsConfig(), testKeyARN)
+	require.NoError(t, err)
+
+	legacyRow, err := reader.Encrypt(context.Background(), []byte("secret"), encCtx)
+	require.NoError(t, err)
+	require.EqualValues(t, 0x01, legacyRow[0], "a reader must still write legacy ciphertexts")
+
+	t.Run("it reads the envelope row", func(t *testing.T) {
+		got, err := reader.Decrypt(context.Background(), envelopeRow, encCtx)
+		require.NoError(t, err)
+		assert.Equal(t, "secret", string(got))
+	})
+
+	// The error contract has to hold for this reader too, or a KMS outage marks
+	// envelope rows as broken on instances that never opted into anything.
+	t.Run("a KMS outage is not a ciphertext problem for it either", func(t *testing.T) {
+		fake.failTransportAlways("Decrypt", stderrors.New("dial tcp: connect: connection refused"))
+		defer func() { fake.failTransport = map[string]error{} }()
+
+		_, err := reader.Decrypt(context.Background(), envelopeRow, encCtx)
+		require.Error(t, err)
+		var invalid *api.InvalidCiphertextError
+		assert.NotErrorAs(t, err, &invalid)
 	})
 }
 
