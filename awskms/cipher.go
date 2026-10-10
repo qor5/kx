@@ -69,6 +69,8 @@ func (f *CipherFactory) Encrypt(
 		"kms.key_id", f.keyID,
 	)
 	appendContext(ctx, encryptionContext)
+	var stats callStats
+	defer stats.appendSpanKVs(ctx)
 	encryptOutput, err := f.kmsCipher.Encrypt(
 		ctx,
 		&kms.EncryptInput{
@@ -76,6 +78,7 @@ func (f *CipherFactory) Encrypt(
 			KeyId:             aws.String(f.keyID),
 			Plaintext:         plaintext,
 		},
+		stats.withStats,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to encrypt data")
@@ -92,6 +95,8 @@ func (f *CipherFactory) Decrypt(
 		"kms.key_id", f.keyID,
 	)
 	appendContext(ctx, encryptionContext)
+	var stats callStats
+	defer stats.appendSpanKVs(ctx)
 	decryptOutput, err := f.kmsCipher.Decrypt(
 		ctx,
 		&kms.DecryptInput{
@@ -99,6 +104,7 @@ func (f *CipherFactory) Decrypt(
 			EncryptionContext: encryptionContext,
 			KeyId:             aws.String(f.keyID),
 		},
+		stats.withStats,
 	)
 	if err != nil {
 		var invalidCiphertextException *types.InvalidCiphertextException
