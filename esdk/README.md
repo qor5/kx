@@ -71,6 +71,15 @@ Step 2 must land before step 3. Without the permission, `Encrypt` fails with
 Because step 1 ships the reader ahead of the writer, rolling step 3 back never
 leaves ciphertext that the running code cannot decrypt.
 
+One consequence to be clear about, since "we have not enabled envelope writes"
+is easy to read as "we are still on the old path": `Decrypt` routes on the
+ciphertext's prefix, not on `WithEnvelopeWrite`. That is what makes the ordering
+above work, but it also means that **from the moment any instance writes the
+first envelope row, every instance that reads it is on the envelope path** — and
+subject to everything below — no matter what its own flag says. The notes that
+follow apply whenever envelope rows exist anywhere, not only to the replicas
+doing the writing.
+
 ## Notes
 
 - **Encryption context is required authenticated data.** `awskms` inherits
@@ -94,6 +103,40 @@ leaves ciphertext that the running code cannot decrypt.
   encrypt/decrypt and ~200 extra bytes per row. `WithSigning(true)` restores the
   Encryption SDK's default if a threat model calls for it; the suite is recorded
   per message, so both kinds stay readable and can coexist in one table.
+- **Set a timeout on `aws.Config.HTTPClient`.** The Encryption SDK accepts a
+  context and then drops it: measured against a fake KMS held at 300ms with a
+  50ms deadline, the call returned success after the full 300ms and the outbound
+  request's context had never been cancelled. A context that is already done on
+  the way in is honoured, but one that expires mid-call is not — so on the
+  envelope path a caller's deadline does not bound the work, and the bare KMS
+  path's protection (where the AWS SDK gets the context directly) is absent.
+
+  What still bounds it is `http.Client.Timeout`, which is enforced below the SDK.
+  It is worth setting explicitly, because aws-sdk-go-v2's default client sets no
+  overall timeout at all — only a 30s dial and a 10s TLS handshake — so a KMS
+  that accepts the connection and then goes quiet is waited on indefinitely. Note
+  the bound is *per attempt*: with the default retryer a 100ms timeout measured
+  ~4.7s in total across three attempts and their backoff. Size it accordingly.
+
+  kx deliberately does not paper over this by running the SDK call in a goroutine
+  of its own and returning when the context fires. That would let the caller
+  leave without stopping the work, removing the backpressure that currently keeps
+  a stalled KMS from being retried into a pile of abandoned in-flight calls.
+- **Concurrent envelope operations trip `-race`.** The Encryption SDK and the
+  material providers library are transpiled from Dafny, and their generated
+  constructors initialise sequence fields from the Dafny runtime's package-level
+  `EmptySeq` singleton — `New_KmsGenerateAndWrapKeyMaterial_` runs
+  `_dafny.EmptySeq.SetString()` on every encrypt, decrypt, and keyring
+  construction. Two goroutines doing envelope crypto at once race on that word.
+  Every reported access to it is a write of the constant `true` and there is no
+  reader, so results stay correct; giving your goroutines separate
+  `CipherFactory` values does not help, since the state belongs to the runtime.
+  Silencing it would mean putting every KMS round trip behind one process-wide
+  lock, which this package does not do — `DecryptStructs` fans out
+  `DefaultDecryptConcurrency` calls and that throughput is worth more than a
+  warning about a write that cannot change a value. If a downstream suite runs
+  `-race` over concurrent envelope operations, this is what it will report. The
+  bare KMS path never enters that code and is unaffected.
 - **KMS sees the full encryption context.** Requiring the context keeps them out
   of the message header but not out of the `GenerateDataKey` / `Decrypt` calls, so
   a `kms:EncryptionContext:<key>` IAM condition key can still be used to narrow

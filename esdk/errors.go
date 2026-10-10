@@ -1,7 +1,9 @@
 package esdk
 
 import (
+	"context"
 	stderrors "errors"
+	"net"
 
 	mpltypes "github.com/aws/aws-cryptographic-material-providers-library/releases/go/mpl/awscryptographymaterialproviderssmithygeneratedtypes"
 	esdktypes "github.com/aws/aws-encryption-sdk/releases/go/encryption-sdk/awscryptographyencryptionsdksmithygeneratedtypes"
@@ -18,7 +20,7 @@ import (
 // unreachable or refused us" — the former is a data problem tied to one row, the
 // latter is an outage or a misconfiguration affecting every row. awskms gets
 // that distinction from a single typed KMS exception; the Encryption SDK reports
-// everything through three untyped shapes instead, so the split has to be
+// everything through several untyped shapes instead, so the split has to be
 // reconstructed here.
 func classifyDecryptError(err error) error {
 	// A KMS InvalidCiphertextException means the wrapped data key does not
@@ -28,11 +30,11 @@ func classifyDecryptError(err error) error {
 		return errors.WithStack(&api.InvalidCiphertextError{Err: err})
 	}
 
-	// Any other modelled service error (AccessDenied, Throttling, KMSInvalidState,
-	// …) is an infrastructure condition. Surface it unchanged so retry and
-	// alerting logic upstream can still see it.
-	var apiErr smithy.APIError
-	if walkErrors(err, func(e error) bool { return stderrors.As(e, &apiErr) }) {
+	// Anything that went wrong while talking to KMS is an infrastructure
+	// condition. Surface it unchanged so retry and alerting logic upstream can
+	// still see it, and so a KMS blip is never recorded against a row as a
+	// ciphertext beyond repair.
+	if walkErrors(err, isTransportFailure) {
 		return errors.WithStack(err)
 	}
 
@@ -40,6 +42,31 @@ func classifyDecryptError(err error) error {
 	// authentication of the message: a corrupt ciphertext, or an encryption
 	// context that does not match the one the message was sealed with.
 	return errors.WithStack(&api.InvalidCiphertextError{Err: err})
+}
+
+// isTransportFailure reports whether e is a failure of the call to KMS rather
+// than of the message being decrypted.
+//
+// smithy.OperationError is what makes the judgement possible: the AWS SDK wraps
+// every call it makes in one, so finding it means the failure happened on the
+// KMS round trip rather than in the Encryption SDK's own reading of the message.
+// The remaining checks catch failures that never reach that wrapper — a dead
+// connection, or a context cancelled while the batch was in flight.
+//
+// Without this, awskms's behaviour would silently change: it reports only KMS's
+// own InvalidCiphertextException as an invalid ciphertext and passes everything
+// else through, so a caller treating api.InvalidCiphertextError as "this row is
+// unrecoverable" stays correct during an outage. Falling through to the
+// Encryption SDK's catch-all would break that for every transport error.
+func isTransportFailure(e error) bool {
+	var apiErr smithy.APIError
+	var opErr *smithy.OperationError
+	var netErr net.Error
+	return stderrors.As(e, &apiErr) ||
+		stderrors.As(e, &opErr) ||
+		stderrors.As(e, &netErr) ||
+		stderrors.Is(e, context.Canceled) ||
+		stderrors.Is(e, context.DeadlineExceeded)
 }
 
 // walkErrors reports whether fn matches err or anything nested inside it.
