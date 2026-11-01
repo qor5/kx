@@ -1,6 +1,6 @@
 module github.com/qor5/kx/esdk
 
-go 1.26.0
+go 1.26.10
 
 require (
 	github.com/aws/aws-cryptographic-material-providers-library/releases/go/mpl v0.4.0
