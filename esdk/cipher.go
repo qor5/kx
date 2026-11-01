@@ -114,6 +114,11 @@ func NewCipherFactory(cfg aws.Config, keyID string, opts ...Option) (*CipherFact
 	// behaves exactly like awskms, which resolves aliases server-side and is
 	// unaffected. That keeps merely adopting the package inert for deployments
 	// still configured with an alias.
+	//
+	// It does not make an alias safe for a reader: Decrypt still matches the key
+	// ARN in an envelope message against keyID, so a replica with writes off and
+	// an alias configured fails on the first envelope row another replica wrote.
+	// Every replica needs the key ARN before writes are turned on anywhere.
 	if f.envelopeWrite && !isKeyARN(keyID) {
 		return nil, errors.Errorf(
 			"envelope encryption requires a KMS key ARN, got %q: the Encryption SDK matches the "+

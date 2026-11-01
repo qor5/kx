@@ -44,6 +44,7 @@ nothing above the cipher layer changes.
 | Reads envelope ciphertexts | Always |
 | Writes envelope ciphertexts | Only with `WithEnvelopeWrite(true)` |
 | Needs `kms:GenerateDataKey` | Only with `WithEnvelopeWrite(true)` |
+| Needs a key ARN as `keyID` | To read envelope ciphertexts, whatever the setting; checked at construction only with `WithEnvelopeWrite(true)` |
 
 Envelope ciphertexts carry a 4-byte prefix beginning `0x00`. A KMS
 `CiphertextBlob` begins with its format version `0x01`, so the two are
@@ -58,8 +59,10 @@ Adopting this package is inert by default: writes still go through
 decrypt envelope ciphertexts. That ordering is the point — deploy readers first,
 then switch writers on.
 
-1. **Add the dependency, leave `WithEnvelopeWrite` off.** Behaviour is unchanged
-   and no IAM change is needed. Let it reach every replica.
+1. **Add the dependency, leave `WithEnvelopeWrite` off, and configure the key
+   ARN.** Behaviour is unchanged and no IAM change is needed. Let it reach every
+   replica. If `keyID` is currently an alias, switch it to the key ARN in this
+   step, on every replica — see below.
 2. **Grant `kms:GenerateDataKey`** on the PII key to the roles that write.
    Existing policies typically list only `kms:Decrypt` and `kms:Encrypt`.
 3. **Turn `WithEnvelopeWrite` on** — preferably from config, so it can be
@@ -79,6 +82,17 @@ first envelope row, every instance that reads it is on the envelope path** — a
 subject to everything below — no matter what its own flag says. The notes that
 follow apply whenever envelope rows exist anywhere, not only to the replicas
 doing the writing.
+
+The same goes for the key ARN. The Encryption SDK matches the key ARN recorded
+in each envelope message against `keyID` on decrypt, and an alias never
+matches. `NewCipherFactory` refuses an alias only when `WithEnvelopeWrite(true)`,
+so a replica with writes off and an alias configured starts normally and keeps
+reading legacy rows — then fails on the first envelope row another replica
+wrote. Switch every replica to the key ARN before turning writes on anywhere:
+
+```
+aws kms describe-key --key-id alias/<name> --query KeyMetadata.Arn
+```
 
 ## Notes
 
