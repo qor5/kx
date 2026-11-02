@@ -22,7 +22,37 @@ import (
 // CipherFactory encrypts with the AWS Encryption SDK and decrypts both the
 // Encryption SDK format and the bare KMS format written by awskms.
 //
-// The returned CipherFactory is safe for concurrent use by multiple goroutines.
+// The returned CipherFactory is safe for concurrent use by multiple goroutines,
+// with one caveat that belongs to the Encryption SDK rather than to this type:
+// concurrent envelope operations trip the Go race detector.
+//
+// The Encryption SDK and the material providers library are transpiled from
+// Dafny, and the generated constructors initialise their sequence fields from
+// the Dafny runtime's package-level EmptySeq singleton —
+// New_KmsGenerateAndWrapKeyMaterial_ runs _dafny.EmptySeq.SetString(), which
+// writes EmptySeq._isString on every encrypt, every decrypt, and every keyring
+// construction. Two goroutines doing envelope crypto at once therefore race on
+// that one word.
+//
+// Measured, not assumed: across a spread of plaintext sizes, signing settings,
+// encryption-context key sets, and several factories, every reported race is the
+// same address, and every access to it is a write of the constant true. There is
+// no reader, so no operation can observe a torn or stale value, and results stay
+// correct — TestCipherFactory_Concurrent covers that.
+//
+// Nor is it about sharing a factory: goroutines that each build their own race
+// just as reliably, because the contended state belongs to the runtime. Serialising
+// entry into the SDK is the only thing that would silence it, and that would put
+// every KMS round trip on the envelope path behind one lock — a real throughput
+// cost (DecryptStructs fans out DefaultDecryptConcurrency) traded for a warning
+// about a write that cannot change a value. So this package does not serialise,
+// and the esdk module's tests do not run under -race.
+//
+// The consequence for callers: a downstream test suite running -race over
+// concurrent envelope operations will report this. It is upstream's to fix.
+//
+// The bare KMS path is unaffected — it goes through awskms and never enters the
+// transpiled code.
 type CipherFactory struct {
 	keyID string
 
@@ -84,6 +114,11 @@ func NewCipherFactory(cfg aws.Config, keyID string, opts ...Option) (*CipherFact
 	// behaves exactly like awskms, which resolves aliases server-side and is
 	// unaffected. That keeps merely adopting the package inert for deployments
 	// still configured with an alias.
+	//
+	// It does not make an alias safe for a reader: Decrypt still matches the key
+	// ARN in an envelope message against keyID, so a replica with writes off and
+	// an alias configured fails on the first envelope row another replica wrote.
+	// Every replica needs the key ARN before writes are turned on anywhere.
 	if f.envelopeWrite && !isKeyARN(keyID) {
 		return nil, errors.Errorf(
 			"envelope encryption requires a KMS key ARN, got %q: the Encryption SDK matches the "+
@@ -142,8 +177,15 @@ func (f *CipherFactory) Encrypt(
 		return f.legacy.Encrypt(ctx, plaintext, encryptionContext)
 	}
 
+	// Spans first: an abandoned attempt should still show up in a trace, which is
+	// what the legacy path does — the AWS SDK is what fails there, after awskms
+	// has recorded the span.
 	f.appendSpanKVs(ctx, encryptionContext)
 	logtracing.AppendSpanKVs(ctx, "kms.envelope", true)
+
+	if err := ctx.Err(); err != nil {
+		return nil, errors.WithStack(err)
+	}
 
 	cmm, err := f.materialsManager(ctx, encryptionContext)
 	if err != nil {
@@ -178,6 +220,10 @@ func (f *CipherFactory) Decrypt(
 
 	f.appendSpanKVs(ctx, encryptionContext)
 	logtracing.AppendSpanKVs(ctx, "kms.envelope", true)
+
+	if err := ctx.Err(); err != nil {
+		return nil, errors.WithStack(err)
+	}
 
 	cmm, err := f.materialsManager(ctx, encryptionContext)
 	if err != nil {
