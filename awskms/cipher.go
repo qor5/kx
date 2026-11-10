@@ -2,10 +2,14 @@ package awskms
 
 import (
 	"context"
+	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"github.com/aws/smithy-go/middleware"
 	"github.com/pkg/errors"
 	"github.com/theplant/appkit/logtracing"
 
@@ -37,8 +41,43 @@ func NewCipherFactory(cfg aws.Config, keyID string) (*CipherFactory, error) {
 
 	return &CipherFactory{
 		keyID:     keyID,
-		kmsCipher: kms.NewFromConfig(cfg),
+		kmsCipher: newKMSClient(cfg),
 	}, nil
+}
+
+// kmsIdleConnTimeout is kept below the roughly 6 seconds after which AWS KMS
+// closes an idle connection. With the SDK default of 90 seconds, a request
+// can be written to a connection KMS has just closed; it then fails with EOF
+// or a reset, and the SDK retries it only after a random backoff of up to
+// 2 seconds.
+const kmsIdleConnTimeout = 5 * time.Second
+
+func newKMSClient(cfg aws.Config) *kms.Client {
+	return kms.NewFromConfig(cfg, func(o *kms.Options) {
+		// A caller-supplied client that is not buildable is left as is.
+		if c, ok := o.HTTPClient.(*awshttp.BuildableClient); ok {
+			o.HTTPClient = c.WithTransportOptions(func(t *http.Transport) {
+				t.IdleConnTimeout = kmsIdleConnTimeout
+			})
+		}
+	})
+}
+
+// countAttempts counts the HTTP requests one KMS operation sends, retries
+// included, by adding a middleware that runs inside the retry loop.
+func countAttempts(n *int) func(*kms.Options) {
+	return func(o *kms.Options) {
+		o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+			return stack.Finalize.Insert(middleware.FinalizeMiddlewareFunc("kx.CountAttempts",
+				func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (
+					middleware.FinalizeOutput, middleware.Metadata, error,
+				) {
+					*n++
+					return next.HandleFinalize(ctx, in)
+				},
+			), "Retry", middleware.After)
+		})
+	}
 }
 
 var _ api.CipherFactory = (*CipherFactory)(nil)
@@ -69,6 +108,7 @@ func (f *CipherFactory) Encrypt(
 		"kms.key_id", f.keyID,
 	)
 	appendContext(ctx, encryptionContext)
+	var attempts int
 	encryptOutput, err := f.kmsCipher.Encrypt(
 		ctx,
 		&kms.EncryptInput{
@@ -76,7 +116,9 @@ func (f *CipherFactory) Encrypt(
 			KeyId:             aws.String(f.keyID),
 			Plaintext:         plaintext,
 		},
+		countAttempts(&attempts),
 	)
+	logtracing.AppendSpanKVs(ctx, "kms.attempts", attempts)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to encrypt data")
 	}
@@ -92,6 +134,7 @@ func (f *CipherFactory) Decrypt(
 		"kms.key_id", f.keyID,
 	)
 	appendContext(ctx, encryptionContext)
+	var attempts int
 	decryptOutput, err := f.kmsCipher.Decrypt(
 		ctx,
 		&kms.DecryptInput{
@@ -99,7 +142,9 @@ func (f *CipherFactory) Decrypt(
 			EncryptionContext: encryptionContext,
 			KeyId:             aws.String(f.keyID),
 		},
+		countAttempts(&attempts),
 	)
+	logtracing.AppendSpanKVs(ctx, "kms.attempts", attempts)
 	if err != nil {
 		var invalidCiphertextException *types.InvalidCiphertextException
 		if errors.As(err, &invalidCiphertextException) {
