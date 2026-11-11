@@ -90,24 +90,34 @@ func (f *CipherFactory) NewDecrypter() api.Decrypter {
 	return f
 }
 
-func appendContext(ctx context.Context, eCtx map[string]string) {
-	var kvs []interface{}
+// startSpan opens a span of its own for one KMS call. The span.type and
+// span.role written here must not land on the caller's span: appended there,
+// they would overwrite the caller's own span.type (an HTTP server span would
+// turn into aws.kms/client) and the caller would disappear from every query
+// that selects spans by type.
+func (f *CipherFactory) startSpan(ctx context.Context, name string, eCtx map[string]string) context.Context {
+	ctx, _ = logtracing.StartSpan(ctx, name)
 
+	kvs := []interface{}{
+		"span.type", "aws.kms",
+		"span.role", "client",
+		"kms.key_id", f.keyID,
+	}
 	for k, v := range eCtx {
 		kvs = append(kvs, "kms.enc_ctx."+k, v)
 	}
 	logtracing.AppendSpanKVs(ctx, kvs...)
+	return ctx
 }
 
 func (f *CipherFactory) Encrypt(
 	ctx context.Context, plaintext []byte, encryptionContext map[string]string,
 ) (ciphertext []byte, err error) {
-	logtracing.AppendSpanKVs(ctx,
-		"span.type", "aws.kms",
-		"span.role", "client",
-		"kms.key_id", f.keyID,
-	)
-	appendContext(ctx, encryptionContext)
+	ctx = f.startSpan(ctx, "aws.kms/Encrypt", encryptionContext)
+	defer func() {
+		logtracing.EndSpan(ctx, err)
+	}()
+
 	var attempts int
 	encryptOutput, err := f.kmsCipher.Encrypt(
 		ctx,
@@ -128,12 +138,11 @@ func (f *CipherFactory) Encrypt(
 func (f *CipherFactory) Decrypt(
 	ctx context.Context, ciphertext []byte, encryptionContext map[string]string,
 ) (plaintext []byte, err error) {
-	logtracing.AppendSpanKVs(ctx,
-		"span.type", "aws.kms",
-		"span.role", "client",
-		"kms.key_id", f.keyID,
-	)
-	appendContext(ctx, encryptionContext)
+	ctx = f.startSpan(ctx, "aws.kms/Decrypt", encryptionContext)
+	defer func() {
+		logtracing.EndSpan(ctx, err)
+	}()
+
 	var attempts int
 	decryptOutput, err := f.kmsCipher.Decrypt(
 		ctx,
